@@ -229,6 +229,7 @@ typedef enum
 	PGSS_TRACK_ALL				/* all statements, including nested ones */
 }	PGSSTrackLevel;
 
+#ifdef NOT_USED
 static const struct config_enum_entry track_options[] =
 {
 	{"none", PGSS_TRACK_NONE, false},
@@ -236,6 +237,7 @@ static const struct config_enum_entry track_options[] =
 	{"all", PGSS_TRACK_ALL, false},
 	{NULL, 0, false}
 };
+#endif
 
 typedef enum
 {
