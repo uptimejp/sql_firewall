@@ -67,6 +67,7 @@
  */
 #include "postgres.h"
 
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -2002,6 +2003,23 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("sql_firewall_import_rule() is available only under the disable mode")));
+
+	{
+		struct stat st;
+
+		if (stat(rule_file, &st) != 0)
+		{
+			ereport(ERROR,
+				(errmsg("could not stat file \"%s\": %m",
+					rule_file)));
+		}
+		if (!S_ISREG(st.st_mode))
+		{
+			ereport(ERROR,
+				(errmsg("\"%s\" is not a regular file",
+					rule_file)));
+		}
+	}
 
 	filep = AllocateFile(rule_file, PG_BINARY_R);
 	if (filep == NULL)
