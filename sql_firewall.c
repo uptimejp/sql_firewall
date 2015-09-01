@@ -86,6 +86,8 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
 
 
 PG_MODULE_MAGIC;
@@ -1228,6 +1230,8 @@ pgss_store(const char *query, uint32 queryId,
 	int			query_len;
 
 	Assert(query != NULL);
+
+	elog(DEBUG1, "pgss_store: query=\"%s\" queryid=%u", query, queryId);
 
 	/* Safety check... */
 	if (!pgss || !pgss_hash)
@@ -2771,6 +2775,7 @@ static void
 JumbleRangeTable(pgssJumbleState *jstate, List *rtable)
 {
 	ListCell   *lc;
+	Relation rel;
 
 	foreach(lc, rtable)
 	{
@@ -2781,7 +2786,9 @@ JumbleRangeTable(pgssJumbleState *jstate, List *rtable)
 		switch (rte->rtekind)
 		{
 			case RTE_RELATION:
-				APP_JUMB(rte->relid);
+				rel = RelationIdGetRelation(rte->relid);
+				APP_JUMB_STRING(RelationGetRelationName(rel));
+				RelationClose(rel);
 				break;
 			case RTE_SUBQUERY:
 				JumbleQuery(jstate, rte->subquery);
