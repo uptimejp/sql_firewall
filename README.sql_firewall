@@ -154,7 +154,7 @@ Views
 
 * sql_firewall.sql_firewall_stat
 
-  sql_firewall_stat view has two couters: "sql_warning" and
+  sql_firewall_stat view has two counters: "sql_warning" and
   "sql_error".
 
   "sql_warning" shows number of executed queries with warnings in the
