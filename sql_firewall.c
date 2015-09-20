@@ -86,6 +86,7 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/relcache.h"
 
@@ -2877,7 +2878,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				Param	   *p = (Param *) node;
 
 				APP_JUMB(p->paramkind);
-				APP_JUMB(p->paramid);
+				APP_JUMB(p->paramid); /* FIXME */
 				APP_JUMB(p->paramtype);
 			}
 			break;
@@ -2885,7 +2886,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				Aggref	   *expr = (Aggref *) node;
 
-				APP_JUMB(expr->aggfnoid);
+				APP_JUMB(expr->aggfnoid); /* FIXME */
 				JumbleExpr(jstate, (Node *) expr->aggdirectargs);
 				JumbleExpr(jstate, (Node *) expr->args);
 				JumbleExpr(jstate, (Node *) expr->aggorder);
@@ -2897,7 +2898,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				WindowFunc *expr = (WindowFunc *) node;
 
-				APP_JUMB(expr->winfnoid);
+				APP_JUMB(expr->winfnoid); /* FIXME */
 				APP_JUMB(expr->winref);
 				JumbleExpr(jstate, (Node *) expr->args);
 				JumbleExpr(jstate, (Node *) expr->aggfilter);
@@ -2916,8 +2917,9 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 		case T_FuncExpr:
 			{
 				FuncExpr   *expr = (FuncExpr *) node;
+				char *funcname = get_func_name(expr->funcid);
 
-				APP_JUMB(expr->funcid);
+				APP_JUMB_STRING(funcname);
 				JumbleExpr(jstate, (Node *) expr->args);
 			}
 			break;
@@ -3017,7 +3019,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				CollateExpr *ce = (CollateExpr *) node;
 
-				APP_JUMB(ce->collOid);
+				APP_JUMB(ce->collOid); /* FIXME */
 				JumbleExpr(jstate, (Node *) ce->arg);
 			}
 			break;
@@ -3107,14 +3109,14 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				CoerceToDomainValue *cdv = (CoerceToDomainValue *) node;
 
-				APP_JUMB(cdv->typeId);
+				APP_JUMB(cdv->typeId); /* FIXME */
 			}
 			break;
 		case T_SetToDefault:
 			{
 				SetToDefault *sd = (SetToDefault *) node;
 
-				APP_JUMB(sd->typeId);
+				APP_JUMB(sd->typeId); /* FIXME */
 			}
 			break;
 		case T_CurrentOfExpr:
