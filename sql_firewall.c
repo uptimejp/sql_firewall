@@ -206,6 +206,8 @@ typedef struct pgssJumbleState
 	int			clocations_count;
 } pgssJumbleState;
 
+extern void JumbleQuery(pgssJumbleState *jstate, Query *query);
+
 /*---- Local variables ----*/
 
 /* Current nesting depth of ExecutorRun+ProcessUtility calls */
@@ -333,7 +335,6 @@ static void gc_qtexts(void);
 static void entry_reset(void);
 static void AppendJumble(pgssJumbleState *jstate,
 			 const unsigned char *item, Size size);
-static void JumbleQuery(pgssJumbleState *jstate, Query *query);
 static void JumbleRangeTable(pgssJumbleState *jstate, List *rtable);
 static void JumbleExpr(pgssJumbleState *jstate, Node *node);
 static void RecordConstLocation(pgssJumbleState *jstate, int location);
@@ -2747,7 +2748,7 @@ AppendJumble(pgssJumbleState *jstate, const unsigned char *item, Size size)
  * be deduced from child nodes (else we'd just be double-hashing that piece
  * of information).
  */
-static void
+void
 JumbleQuery(pgssJumbleState *jstate, Query *query)
 {
 	Assert(IsA(query, Query));
