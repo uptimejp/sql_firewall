@@ -33,6 +33,18 @@ allows to execute even not in the firewall rules. And produces
 warnings if the queries are not in the rules.
 
 
+Compatibility
+-------------
+
+sql_firewall supports PostgreSQL 9.4.x. Other major versions would be
+supported in the future release.
+
+Exported rule files would not be compatible between different
+PostgreSQL major versions, because queryid is calculated from the
+internal data structure (the Query structure) which is different in
+different major versions.
+
+
 Installation
 ------------
 
