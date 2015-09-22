@@ -67,6 +67,7 @@
  */
 #include "postgres.h"
 
+#include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -85,6 +86,9 @@
 #include "tcop/utility.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
+#include "utils/lsyscache.h"
+#include "utils/rel.h"
+#include "utils/relcache.h"
 
 
 PG_MODULE_MAGIC;
@@ -202,6 +206,8 @@ typedef struct pgssJumbleState
 	int			clocations_count;
 } pgssJumbleState;
 
+extern void JumbleQuery(pgssJumbleState *jstate, Query *query);
+
 /*---- Local variables ----*/
 
 /* Current nesting depth of ExecutorRun+ProcessUtility calls */
@@ -229,6 +235,7 @@ typedef enum
 	PGSS_TRACK_ALL				/* all statements, including nested ones */
 }	PGSSTrackLevel;
 
+#ifdef NOT_USED
 static const struct config_enum_entry track_options[] =
 {
 	{"none", PGSS_TRACK_NONE, false},
@@ -236,6 +243,7 @@ static const struct config_enum_entry track_options[] =
 	{"all", PGSS_TRACK_ALL, false},
 	{NULL, 0, false}
 };
+#endif
 
 typedef enum
 {
@@ -327,7 +335,6 @@ static void gc_qtexts(void);
 static void entry_reset(void);
 static void AppendJumble(pgssJumbleState *jstate,
 			 const unsigned char *item, Size size);
-static void JumbleQuery(pgssJumbleState *jstate, Query *query);
 static void JumbleRangeTable(pgssJumbleState *jstate, List *rtable);
 static void JumbleExpr(pgssJumbleState *jstate, Node *node);
 static void RecordConstLocation(pgssJumbleState *jstate, int location);
@@ -1228,6 +1235,8 @@ pgss_store(const char *query, uint32 queryId,
 
 	Assert(query != NULL);
 
+	elog(DEBUG1, "pgss_store: query=\"%s\" queryid=%u", query, queryId);
+
 	/* Safety check... */
 	if (!pgss || !pgss_hash)
 		return;
@@ -2003,6 +2012,23 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("sql_firewall_import_rule() is available only under the disable mode")));
 
+	{
+		struct stat st;
+
+		if (stat(rule_file, &st) != 0)
+		{
+			ereport(ERROR,
+				(errmsg("could not stat file \"%s\": %m",
+					rule_file)));
+		}
+		if (!S_ISREG(st.st_mode))
+		{
+			ereport(ERROR,
+				(errmsg("\"%s\" is not a regular file",
+					rule_file)));
+		}
+	}
+
 	filep = AllocateFile(rule_file, PG_BINARY_R);
 	if (filep == NULL)
 		ereport(ERROR,
@@ -2722,7 +2748,7 @@ AppendJumble(pgssJumbleState *jstate, const unsigned char *item, Size size)
  * be deduced from child nodes (else we'd just be double-hashing that piece
  * of information).
  */
-static void
+void
 JumbleQuery(pgssJumbleState *jstate, Query *query)
 {
 	Assert(IsA(query, Query));
@@ -2753,6 +2779,7 @@ static void
 JumbleRangeTable(pgssJumbleState *jstate, List *rtable)
 {
 	ListCell   *lc;
+	Relation rel;
 
 	foreach(lc, rtable)
 	{
@@ -2763,7 +2790,9 @@ JumbleRangeTable(pgssJumbleState *jstate, List *rtable)
 		switch (rte->rtekind)
 		{
 			case RTE_RELATION:
-				APP_JUMB(rte->relid);
+				rel = RelationIdGetRelation(rte->relid);
+				APP_JUMB_STRING(RelationGetRelationName(rel));
+				RelationClose(rel);
 				break;
 			case RTE_SUBQUERY:
 				JumbleQuery(jstate, rte->subquery);
@@ -2850,7 +2879,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 				Param	   *p = (Param *) node;
 
 				APP_JUMB(p->paramkind);
-				APP_JUMB(p->paramid);
+				APP_JUMB(p->paramid); /* FIXME */
 				APP_JUMB(p->paramtype);
 			}
 			break;
@@ -2858,7 +2887,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				Aggref	   *expr = (Aggref *) node;
 
-				APP_JUMB(expr->aggfnoid);
+				APP_JUMB(expr->aggfnoid); /* FIXME */
 				JumbleExpr(jstate, (Node *) expr->aggdirectargs);
 				JumbleExpr(jstate, (Node *) expr->args);
 				JumbleExpr(jstate, (Node *) expr->aggorder);
@@ -2870,7 +2899,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				WindowFunc *expr = (WindowFunc *) node;
 
-				APP_JUMB(expr->winfnoid);
+				APP_JUMB(expr->winfnoid); /* FIXME */
 				APP_JUMB(expr->winref);
 				JumbleExpr(jstate, (Node *) expr->args);
 				JumbleExpr(jstate, (Node *) expr->aggfilter);
@@ -2889,8 +2918,9 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 		case T_FuncExpr:
 			{
 				FuncExpr   *expr = (FuncExpr *) node;
+				char *funcname = get_func_name(expr->funcid);
 
-				APP_JUMB(expr->funcid);
+				APP_JUMB_STRING(funcname);
 				JumbleExpr(jstate, (Node *) expr->args);
 			}
 			break;
@@ -2990,7 +3020,7 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				CollateExpr *ce = (CollateExpr *) node;
 
-				APP_JUMB(ce->collOid);
+				APP_JUMB(ce->collOid); /* FIXME */
 				JumbleExpr(jstate, (Node *) ce->arg);
 			}
 			break;
@@ -3080,14 +3110,14 @@ JumbleExpr(pgssJumbleState *jstate, Node *node)
 			{
 				CoerceToDomainValue *cdv = (CoerceToDomainValue *) node;
 
-				APP_JUMB(cdv->typeId);
+				APP_JUMB(cdv->typeId); /* FIXME */
 			}
 			break;
 		case T_SetToDefault:
 			{
 				SetToDefault *sd = (SetToDefault *) node;
 
-				APP_JUMB(sd->typeId);
+				APP_JUMB(sd->typeId); /* FIXME */
 			}
 			break;
 		case T_CurrentOfExpr:

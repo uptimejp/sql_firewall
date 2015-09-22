@@ -1,0 +1,18 @@
+2015-09-23 Satoshi Nagayasu <snaga@uptime.jp>
+
+	* Version 0.8.1
+	* Fix sql_firewall.c to suppress `unused-const-variable' warning
+	  on OS X.
+	* Fix sql_firewall_import_rule() to check file status before
+	  importing a rule file.
+	* Fix JumbleRangeTable() to jumble query with relation name
+	  instead of oid.
+	* Fix JumbleExpr() to use function name on query jumbling instead
+	  of the oid.
+	* Fix README to add the Compatibility section.
+	* Add COPYRIGHT and ChangeLog.
+
+2015-08-24 Satoshi Nagayasu <snaga@uptime.jp>
+
+	* Version 0.8
+	* The first public release.
