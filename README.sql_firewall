@@ -36,13 +36,13 @@ warnings if the queries are not in the rules.
 Compatibility
 -------------
 
-sql_firewall supports PostgreSQL 9.4.x. Other major versions would be
-supported in the future release.
+sql_firewall supports PostgreSQL 9.4.x, 18.x and 19.x.
 
-Exported rule files would not be compatible between different
-PostgreSQL major versions, because queryid is calculated from the
-internal data structure (the Query structure) which is different in
-different major versions.
+On PostgreSQL 18 and 19, SQL statements use PostgreSQL's 64-bit query IDs.
+Utility statements use a hash of the individual statement text.
+Relearn rules in the destination cluster after a major-version upgrade.
+Rule IDs in saved or exported rules are specific to the PostgreSQL major
+version and may also depend on object OIDs.
 
 
 Installation
@@ -54,6 +54,11 @@ sql_firewall can be built as a PostgreSQL extension.
     $ export USE_PGXS=1
     $ make
     $ sudo make install
+
+On PostgreSQL 18 or 19, run the smoke test as an unprivileged OS user
+after installing sql_firewall and pg_stat_statements for that version.
+
+    $ PG_CONFIG=$PGHOME/bin/pg_config sh tests/smoke.sh
 
 
 Configuration
@@ -86,20 +91,19 @@ GUC Parameters
 
      shared_preload_libraries = 'sql_firewall'
 
-   Note for developers
-   -------------------
+   On PostgreSQL 18 and 19, sql_firewall and pg_stat_statements can be
+   preloaded in either order. Both use the query ID computed by PostgreSQL.
 
-   pg_stat_statements built with `--enable-cassert' causes assert when
-   queryId already has non-zero value.
-
-   So, to use both pg_stat_statements and sql_firewall at the same
-   time, pg_stat_statements needs to be loaded prior to sql_firewall
-   in the shared_preload_libraries parameter as following.
+   On PostgreSQL 9.4, preload pg_stat_statements first to avoid an assertion
+   failure in pg_stat_statements builds with assertion checking enabled.
 
      shared_preload_libraries = 'pg_stat_statements,sql_firewall'
 
-   Then, sql_firewall can skip queryId calculation if queryId is
-   already set by pg_stat_statements, and avoid the assert.
+* compute_query_id (PostgreSQL 18 and 19)
+
+  Keep the default setting of 'auto', or explicitly set it to 'on'.
+  With SQL Firewall active and compute_query_id set to 'off', queries
+  requiring a query ID are rejected with a configuration error.
 
 * sql_firewall.firewall
 

@@ -31,10 +31,11 @@
  * as the collations of Vars and, most notably, the values of constants.
  *
  * This jumble is acquired at the end of parse analysis of each query, and
- * a 32-bit hash of it is stored into the query's Query.queryId field.
+ * its hash is stored in Query.queryId. PostgreSQL 18 and later compute
+ * the 64-bit query ID in core.
  * The server then copies this value around, making it available in plan
  * tree(s) generated from the query.  The executor can then use this value
- * to blame query costs on the proper queryId.
+ * to find the firewall rule for the query.
  *
  * To facilitate presenting entries to users, we create "representative" query
  * strings in which constants are replaced with '?' characters, to make it
@@ -71,7 +72,18 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#if PG_VERSION_NUM >= 180000
+#include "access/parallel.h"
+#include "common/hashfn.h"
+#include "common/keywords.h"
+#include "nodes/queryjumble.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
+#include "utils/guc.h"
+#include "utils/tuplestore.h"
+#else
 #include "access/hash.h"
+#endif
 #include "executor/instrument.h"
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
@@ -90,6 +102,19 @@
 #include "utils/rel.h"
 #include "utils/relcache.h"
 
+
+#if PG_VERSION_NUM >= 180000
+typedef uint64 FirewallQueryId;
+typedef JumbleState pgssJumbleState;
+typedef LocationLen pgssLocationLen;
+#if PG_VERSION_NUM >= 190000
+typedef const JumbleState ParseJumbleState;
+#else
+typedef JumbleState ParseJumbleState;
+#endif
+#else
+typedef uint32 FirewallQueryId;
+#endif
 
 PG_MODULE_MAGIC;
 
@@ -111,7 +136,11 @@ PG_MODULE_MAGIC;
 static const uint32 PGSS_FILE_HEADER = 0x20140125;
 
 /* PostgreSQL major version number, changes in which invalidate all entries */
+#if PG_VERSION_NUM >= 180000
+static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 10000;
+#else
 static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
+#endif
 
 /* XXX: Should USAGE_EXEC reflect execution time and/or buffer usage? */
 #define USAGE_EXEC(duration)	(1.0)
@@ -125,13 +154,12 @@ static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
 #define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 /*
- * Hashtable key that defines the identity of a hashtable entry.  We separate
- * queries by user and by database even if they are otherwise identical.
+ * Hashtable key that identifies a rule by user and query ID.
  */
 typedef struct pgssHashKey
 {
 	Oid			userid;			/* user OID */
-	uint32		queryid;		/* query identifier */
+	FirewallQueryId queryid;		/* query identifier */
 } pgssHashKey;
 
 /*
@@ -165,6 +193,9 @@ typedef struct pgssEntry
 typedef struct pgssSharedState
 {
 	LWLock	   *lock;			/* protects hashtable search/modification */
+#if PG_VERSION_NUM >= 190000
+	LWLockPadded lock_storage;
+#endif
 	double		cur_median_usage;		/* current median usage in hashtable */
 	Size		mean_query_len; /* current mean entry text length */
 	slock_t		mutex;			/* protects following fields only: */
@@ -175,6 +206,7 @@ typedef struct pgssSharedState
 	int64			warning_count;
 } pgssSharedState;
 
+#if PG_VERSION_NUM < 180000
 /*
  * Struct for tracking locations/lengths of constants during normalization
  */
@@ -207,6 +239,7 @@ typedef struct pgssJumbleState
 } pgssJumbleState;
 
 extern void JumbleQuery(pgssJumbleState *jstate, Query *query);
+#endif
 
 /*---- Local variables ----*/
 
@@ -214,7 +247,12 @@ extern void JumbleQuery(pgssJumbleState *jstate, Query *query);
 static int	nested_level = 0;
 
 /* Saved hook values in case of unload */
+#if PG_VERSION_NUM < 190000
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+#endif
+#if PG_VERSION_NUM >= 180000 && PG_VERSION_NUM < 190000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+#endif
 static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -284,7 +322,9 @@ static bool pgss_save;			/* whether to save stats across shutdown */
 /*---- Function declarations ----*/
 
 void		_PG_init(void);
+#if PG_VERSION_NUM < 180000
 void		_PG_fini(void);
+#endif
 
 PG_FUNCTION_INFO_V1(sql_firewall_reset);
 PG_FUNCTION_INFO_V1(sql_firewall_statements);
@@ -294,30 +334,66 @@ PG_FUNCTION_INFO_V1(sql_firewall_stat_reset);
 PG_FUNCTION_INFO_V1(sql_firewall_export_rule);
 PG_FUNCTION_INFO_V1(sql_firewall_import_rule);
 
+#if PG_VERSION_NUM >= 190000
+static void pgss_shmem_request(void *arg);
+static void pgss_shmem_startup(void *arg);
+
+static const ShmemCallbacks pgss_shmem_callbacks = {
+	.request_fn = pgss_shmem_request,
+	.init_fn = pgss_shmem_startup,
+};
+#else
 static void pgss_shmem_startup(void);
+#if PG_VERSION_NUM >= 180000
+static void pgss_shmem_request(void);
+#endif
+#endif
 static void update_firewall_rule_file(void);
 static void update_firewall_counter_file(void);
 static void pgss_shmem_shutdown(int code, Datum arg);
+#if PG_VERSION_NUM < 180000
 static void pgss_post_parse_analyze(ParseState *pstate, Query *query);
+#else
+static void pgss_post_parse_analyze(ParseState *pstate, Query *query,
+								   ParseJumbleState *jstate);
+#endif
 static void pgss_ExecutorStart(QueryDesc *queryDesc, int eflags);
 static void pgss_ExecutorRun(QueryDesc *queryDesc,
 				 ScanDirection direction,
+#if PG_VERSION_NUM >= 180000
+				 uint64 count);
+#else
 				 long count);
+#endif
 static void pgss_ExecutorFinish(QueryDesc *queryDesc);
 static void pgss_ExecutorEnd(QueryDesc *queryDesc);
+#if PG_VERSION_NUM < 180000
 static void pgss_ProcessUtility(Node *parsetree, const char *queryString,
 					ProcessUtilityContext context, ParamListInfo params,
 					DestReceiver *dest, char *completionTag);
+#else
+static void pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+								bool readOnlyTree, ProcessUtilityContext context,
+								ParamListInfo params, QueryEnvironment *queryEnv,
+								DestReceiver *dest, QueryCompletion *qc);
+static void stat_warning_increment(void);
+static void stat_error_increment(void);
+static void pgss_check(FirewallQueryId queryId);
+static void pgss_store_statement(const char *query, int location, int len,
+								 FirewallQueryId queryId, const JumbleState *jstate);
+#endif
 static uint32 pgss_hash_fn(const void *key, Size keysize);
 static int	pgss_match_fn(const void *key1, const void *key2, Size keysize);
-static uint32 pgss_hash_string(const char *str);
-static void pgss_store(const char *query, uint32 queryId,
+static FirewallQueryId pgss_hash_string(const char *str);
+static void pgss_store(const char *query, FirewallQueryId queryId,
 		   double total_time, uint64 rows,
 		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate);
 static void pg_stat_statements_internal(FunctionCallInfo fcinfo,
 							bool showtext);
+#if PG_VERSION_NUM < 190000
 static Size pgss_memsize(void);
+#endif
 static pgssEntry *entry_alloc(pgssHashKey *key, Size query_offset, int query_len,
 			int encoding, bool sticky);
 #ifdef NOT_USED
@@ -325,7 +401,7 @@ static void entry_dealloc(void);
 #endif
 static bool qtext_store(const char *query, int query_len,
 			Size *query_offset, int *gc_count);
-static bool pgss_restore(Oid userid, uint32 queryid, const char *query,
+static bool pgss_restore(Oid userid, FirewallQueryId queryid, const char *query,
 			 int64 calls);
 static char *qtext_load_file(Size *buffer_size);
 static char *qtext_fetch(Size query_offset, int query_len,
@@ -333,11 +409,13 @@ static char *qtext_fetch(Size query_offset, int query_len,
 static bool need_gc_qtexts(void);
 static void gc_qtexts(void);
 static void entry_reset(void);
+#if PG_VERSION_NUM < 180000
 static void AppendJumble(pgssJumbleState *jstate,
 			 const unsigned char *item, Size size);
 static void JumbleRangeTable(pgssJumbleState *jstate, List *rtable);
 static void JumbleExpr(pgssJumbleState *jstate, Node *node);
 static void RecordConstLocation(pgssJumbleState *jstate, int location);
+#endif
 static char *generate_normalized_query(pgssJumbleState *jstate, const char *query,
 						  int *query_len_p, int encoding);
 static void fill_in_constant_lengths(pgssJumbleState *jstate, const char *query);
@@ -392,21 +470,35 @@ _PG_init(void)
 							 NULL,
 							 NULL);
 
+#if PG_VERSION_NUM >= 180000
+	MarkGUCPrefixReserved("sql_firewall");
+	EnableQueryId();
+#else
 	EmitWarningsOnPlaceholders("sql_firewall");
+#endif
 
 	/*
 	 * Request additional shared resources.  (These are no-ops if we're not in
 	 * the postmaster process.)  We'll allocate or attach to the shared
 	 * resources in pgss_shmem_startup().
 	 */
+#if PG_VERSION_NUM >= 190000
+	RegisterShmemCallbacks(&pgss_shmem_callbacks);
+#elif PG_VERSION_NUM >= 180000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pgss_shmem_request;
+#else
 	RequestAddinShmemSpace(pgss_memsize());
 	RequestAddinLWLocks(1);
+#endif
 
 	/*
 	 * Install hooks.
 	 */
+#if PG_VERSION_NUM < 190000
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgss_shmem_startup;
+#endif
 	prev_post_parse_analyze_hook = post_parse_analyze_hook;
 	post_parse_analyze_hook = pgss_post_parse_analyze;
 	prev_ExecutorStart = ExecutorStart_hook;
@@ -421,6 +513,7 @@ _PG_init(void)
 	ProcessUtility_hook = pgss_ProcessUtility;
 }
 
+#if PG_VERSION_NUM < 180000
 /*
  * Module unload callback
  */
@@ -436,6 +529,34 @@ _PG_fini(void)
 	ExecutorEnd_hook = prev_ExecutorEnd;
 	ProcessUtility_hook = prev_ProcessUtility;
 }
+#endif
+
+#if PG_VERSION_NUM >= 190000
+static void
+pgss_shmem_request(void *arg)
+{
+	ShmemRequestHash(.name = "sql_firewall hash",
+					 .nelems = (int64) pgss_max,
+					 .hash_info.keysize = sizeof(pgssHashKey),
+					 .hash_info.entrysize = sizeof(pgssEntry),
+					 .hash_info.hash = pgss_hash_fn,
+					 .hash_info.match = pgss_match_fn,
+					 .hash_flags = HASH_ELEM | HASH_FUNCTION | HASH_COMPARE,
+					 .ptr = &pgss_hash);
+	ShmemRequestStruct(.name = "sql_firewall",
+					   .size = sizeof(pgssSharedState),
+					   .ptr = (void **) &pgss);
+}
+#elif PG_VERSION_NUM >= 180000
+static void
+pgss_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+	RequestAddinShmemSpace(pgss_memsize());
+	RequestNamedLWLockTranche("sql_firewall", 1);
+}
+#endif
 
 /*
  * shmem_startup hook: allocate or attach to shared memory,
@@ -444,10 +565,16 @@ _PG_fini(void)
  * (even if empty) while the module is enabled.
  */
 static void
+#if PG_VERSION_NUM >= 190000
+pgss_shmem_startup(void *arg)
+#else
 pgss_shmem_startup(void)
+#endif
 {
-	bool		found;
+	bool		found = false;
+#if PG_VERSION_NUM < 190000
 	HASHCTL		info;
+#endif
 	FILE	   *file = NULL;
 	FILE	   *qfile = NULL;
 	uint32		header;
@@ -457,6 +584,9 @@ pgss_shmem_startup(void)
 	int			buffer_size;
 	char	   *buffer = NULL;
 
+#if PG_VERSION_NUM >= 190000
+	Assert(!IsUnderPostmaster);
+#else
 	if (prev_shmem_startup_hook)
 		prev_shmem_startup_hook();
 
@@ -473,10 +603,18 @@ pgss_shmem_startup(void)
 						   sizeof(pgssSharedState),
 						   &found);
 
+#endif
+
 	if (!found)
 	{
-		/* First time through ... */
+#if PG_VERSION_NUM >= 190000
+		pgss->lock = &pgss->lock_storage.lock;
+		LWLockInitialize(pgss->lock, LWLockNewTrancheId("sql_firewall"));
+#elif PG_VERSION_NUM >= 180000
+		pgss->lock = &GetNamedLWLockTranche("sql_firewall")[0].lock;
+#else
 		pgss->lock = LWLockAssign();
+#endif
 		pgss->cur_median_usage = ASSUMED_MEDIAN_INIT;
 		pgss->mean_query_len = ASSUMED_LENGTH_INIT;
 		SpinLockInit(&pgss->mutex);
@@ -487,6 +625,7 @@ pgss_shmem_startup(void)
 		pgss->error_count = 0;
 	}
 
+#if PG_VERSION_NUM < 190000
 	memset(&info, 0, sizeof(info));
 	info.keysize = sizeof(pgssHashKey);
 	info.entrysize = sizeof(pgssEntry);
@@ -498,6 +637,7 @@ pgss_shmem_startup(void)
 							  HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
 
 	LWLockRelease(AddinShmemInitLock);
+#endif
 
 	/*
 	 * If we're in the postmaster (or a standalone backend...), set up a shmem
@@ -852,6 +992,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 	return;
 }
 
+#if PG_VERSION_NUM < 180000
 /*
  * Post-parse-analysis hook: mark query with a queryId
  */
@@ -922,6 +1063,32 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 				   NULL,
 				   &jstate);
 }
+#else
+/*
+ * PostgreSQL computes the query ID before invoking this hook. Store the
+ * normalized text while the constant locations are still available.
+ */
+static void
+pgss_post_parse_analyze(ParseState *pstate, Query *query, ParseJumbleState *jstate)
+{
+	if (prev_post_parse_analyze_hook)
+		prev_post_parse_analyze_hook(pstate, query, jstate);
+
+	if (query->utilityStmt || !pgss || !pgss_enabled() ||
+		pgfw_mode == PGFW_MODE_DISABLED)
+		return;
+
+	if (!IsQueryIdEnabled())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("sql_firewall requires compute_query_id to be auto or on")));
+
+	if (pgfw_mode == PGFW_MODE_LEARNING && jstate &&
+		jstate->clocations_count > 0)
+		pgss_store_statement(pstate->p_sourcetext, query->stmt_location,
+							 query->stmt_len, query->queryId, jstate);
+}
+#endif
 
 /*
  * ExecutorStart hook: start up tracking if needed
@@ -929,11 +1096,17 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 static void
 pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
+#if PG_VERSION_NUM >= 180000
+	if (pgss_enabled() && !IsParallelWorker() &&
+		queryDesc->plannedstmt->queryId != 0)
+		pgss_check(queryDesc->plannedstmt->queryId);
+#endif
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
 		standard_ExecutorStart(queryDesc, eflags);
 
+#if PG_VERSION_NUM < 180000
 	/*
 	 * If query has queryId zero, don't track it.  This prevents double
 	 * counting of optimizable statements that are directly contained in
@@ -955,13 +1128,20 @@ pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
+#endif
+
 }
 
 /*
  * ExecutorRun hook: all we need do is track nesting depth
  */
 static void
-pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
+pgss_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction,
+#if PG_VERSION_NUM >= 180000
+				 uint64 count)
+#else
+				 long count)
+#endif
 {
 	nested_level++;
 	PG_TRY();
@@ -1009,8 +1189,9 @@ pgss_ExecutorFinish(QueryDesc *queryDesc)
 static void
 pgss_ExecutorEnd(QueryDesc *queryDesc)
 {
-	uint32		queryId = queryDesc->plannedstmt->queryId;
+	FirewallQueryId queryId = queryDesc->plannedstmt->queryId;
 
+#if PG_VERSION_NUM < 180000
 	if (queryId != 0 && queryDesc->totaltime && pgss_enabled())
 	{
 		/*
@@ -1026,6 +1207,15 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 				   &queryDesc->totaltime->bufusage,
 				   NULL);
 	}
+#else
+	if (queryId != 0 && pgss_enabled() && !IsParallelWorker())
+	{
+		PlannedStmt *pstmt = queryDesc->plannedstmt;
+
+		pgss_store_statement(queryDesc->sourceText, pstmt->stmt_location,
+							 pstmt->stmt_len, queryId, NULL);
+	}
+#endif
 
 	if (prev_ExecutorEnd)
 		prev_ExecutorEnd(queryDesc);
@@ -1033,6 +1223,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		standard_ExecutorEnd(queryDesc);
 }
 
+#if PG_VERSION_NUM < 180000
 /*
  * ProcessUtility hook
  */
@@ -1154,6 +1345,121 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 									dest, completionTag);
 	}
 }
+#else
+/*
+ * Check utility commands before execution. PREPARE and EXECUTE leave the
+ * decision to the executor for the underlying statement.
+ */
+static void
+pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
+					bool readOnlyTree, ProcessUtilityContext context,
+					ParamListInfo params, QueryEnvironment *queryEnv,
+					DestReceiver *dest, QueryCompletion *qc)
+{
+	Node	   *parsetree = pstmt->utilityStmt;
+	char	   *query = NULL;
+	FirewallQueryId queryId = 0;
+	bool		track = pgss_enabled() &&
+		!IsA(parsetree, ExecuteStmt) &&
+		!IsA(parsetree, PrepareStmt) &&
+		!IsA(parsetree, DeallocateStmt);
+
+	if (track)
+	{
+		int			location = pstmt->stmt_location;
+		int			len = pstmt->stmt_len;
+		const char *clean = CleanQuerytext(queryString, &location, &len);
+
+		query = pnstrdup(clean, len);
+		queryId = pgss_hash_string(query);
+		pgss_check(queryId);
+		nested_level++;
+	}
+
+	PG_TRY();
+	{
+		if (prev_ProcessUtility)
+			prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+								params, queryEnv, dest, qc);
+		else
+			standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+									params, queryEnv, dest, qc);
+	}
+	PG_FINALLY();
+	{
+		if (track)
+			nested_level--;
+	}
+	PG_END_TRY();
+
+	if (track)
+	{
+		pgss_store(query, queryId, 0, 0, NULL, NULL);
+		pfree(query);
+	}
+}
+
+static void
+pgss_check(FirewallQueryId queryId)
+{
+	pgssHashKey key;
+	bool		found;
+
+	if (!pgss || !pgss_hash ||
+		(pgfw_mode != PGFW_MODE_ENFORCING && pgfw_mode != PGFW_MODE_PERMISSIVE))
+		return;
+
+	key.userid = GetUserId();
+	key.queryid = queryId;
+	LWLockAcquire(pgss->lock, LW_SHARED);
+	found = hash_search(pgss_hash, &key, HASH_FIND, NULL) != NULL;
+	LWLockRelease(pgss->lock);
+
+	if (found)
+		return;
+
+	if (pgfw_mode == PGFW_MODE_ENFORCING)
+	{
+		stat_error_increment();
+		ereport(ERROR,
+				(errcode(ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED),
+				 errmsg("Prohibited SQL statement")));
+	}
+
+	stat_warning_increment();
+	ereport(WARNING, (errmsg("Prohibited SQL statement")));
+}
+
+static void
+pgss_store_statement(const char *query, int location, int len,
+					 FirewallQueryId queryId, const JumbleState *jstate)
+{
+	const char *clean;
+	char	   *text;
+
+	if (!query)
+		return;
+
+	clean = CleanQuerytext(query, &location, &len);
+	text = pnstrdup(clean, len);
+	if (jstate)
+	{
+		JumbleState local = *jstate;
+		int			i;
+
+		local.clocations = palloc(local.clocations_count * sizeof(LocationLen));
+		memcpy(local.clocations, jstate->clocations,
+			   local.clocations_count * sizeof(LocationLen));
+		for (i = 0; i < local.clocations_count; i++)
+			local.clocations[i].location -= location;
+		pgss_store(text, queryId, 0, 0, NULL, &local);
+		pfree(local.clocations);
+	}
+	else
+		pgss_store(text, queryId, 0, 0, NULL, NULL);
+	pfree(text);
+}
+#endif
 
 /*
  * Calculate hash value for a key
@@ -1163,8 +1469,12 @@ pgss_hash_fn(const void *key, Size keysize)
 {
 	const pgssHashKey *k = (const pgssHashKey *) key;
 
-	return hash_uint32((uint32) k->userid) ^
-		hash_uint32((uint32) k->queryid);
+	uint32		hash = hash_uint32(k->userid) ^ hash_uint32((uint32) k->queryid);
+
+#if PG_VERSION_NUM >= 180000
+	hash ^= hash_uint32((uint32) (k->queryid >> 32));
+#endif
+	return hash;
 }
 
 /*
@@ -1188,10 +1498,14 @@ pgss_match_fn(const void *key1, const void *key2, Size keysize)
  * identifying the query, without normalizing constants.  Used when hashing
  * utility statements.
  */
-static uint32
+static FirewallQueryId
 pgss_hash_string(const char *str)
 {
+#if PG_VERSION_NUM >= 180000
+	return hash_bytes_extended((const unsigned char *) str, strlen(str), 0);
+#else
 	return hash_any((const unsigned char *) str, strlen(str));
+#endif
 }
 
 static void
@@ -1222,7 +1536,7 @@ stat_error_increment(void)
  * query string.  total_time, rows, bufusage are ignored in this case.
  */
 static void
-pgss_store(const char *query, uint32 queryId,
+pgss_store(const char *query, FirewallQueryId queryId,
 		   double total_time, uint64 rows,
 		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate)
@@ -1235,7 +1549,7 @@ pgss_store(const char *query, uint32 queryId,
 
 	Assert(query != NULL);
 
-	elog(DEBUG1, "pgss_store: query=\"%s\" queryid=%u", query, queryId);
+	elog(DEBUG1, "pgss_store: query=\"%s\" queryid=" UINT64_FORMAT, query, (uint64) queryId);
 
 	/* Safety check... */
 	if (!pgss || !pgss_hash)
@@ -1252,6 +1566,7 @@ pgss_store(const char *query, uint32 queryId,
 
 	entry = (pgssEntry *) hash_search(pgss_hash, &key, HASH_FIND, NULL);
 
+#if PG_VERSION_NUM < 180000
 	if (!entry)
 	{
 		if (pgfw_mode == PGFW_MODE_ENFORCING)
@@ -1269,6 +1584,7 @@ pgss_store(const char *query, uint32 queryId,
 			goto done;
 		}
 	}
+#endif
 
 	/* Create new entry, if not present */
 	if (!entry && pgfw_mode == PGFW_MODE_LEARNING)
@@ -1627,7 +1943,10 @@ pg_stat_statements_internal(FunctionCallInfo fcinfo,
 	if (qbuffer)
 		free(qbuffer);
 
+#if PG_VERSION_NUM < 180000
 	tuplestore_donestoring(tupstore);
+#endif
+
 }
 
 Datum
@@ -1755,7 +2074,7 @@ sql_firewall_export_rule(PG_FUNCTION_ARGS)
 		    strchr(qstr, ',') != NULL || strchr(qstr, '"') != NULL)
 			need_quote = 1;
 
-		fprintf(filep, "%d,%u,", entry->key.userid, entry->key.queryid);
+		fprintf(filep, "%u," INT64_FORMAT ",", entry->key.userid, (int64) entry->key.queryid);
 		if (need_quote)
 			fprintf(filep, "\"");
 
@@ -1772,11 +2091,12 @@ sql_firewall_export_rule(PG_FUNCTION_ARGS)
 		if (need_quote)
 			fprintf(filep, "\"");
 
-		fprintf(filep, ",%ld\n", tmp.calls);
+		fprintf(filep, "," INT64_FORMAT "\n", tmp.calls);
 
 		//#ifdef NOT_USED
-		elog(DEBUG1, "user=%d, queryid=%u, query=%s, len=%zd, query_len=%d, calls=%ld", entry->key.userid,
-		     entry->key.queryid, qstr, strlen(qstr), entry->query_len, tmp.calls);
+		elog(DEBUG1, "user=%u, queryid=" INT64_FORMAT ", query=%s, len=%zd, query_len=%d, calls=" INT64_FORMAT,
+			 entry->key.userid, (int64) entry->key.queryid, qstr,
+			 strlen(qstr), entry->query_len, tmp.calls);
 		//#endif
 	}
 
@@ -1792,7 +2112,7 @@ sql_firewall_export_rule(PG_FUNCTION_ARGS)
 }
 
 static bool
-pgss_restore(Oid userid, uint32 queryid, const char *query, int64 calls)
+pgss_restore(Oid userid, FirewallQueryId queryid, const char *query, int64 calls)
 {
 	pgssHashKey key;
 	pgssEntry  *entry;
@@ -1817,7 +2137,8 @@ pgss_restore(Oid userid, uint32 queryid, const char *query, int64 calls)
 	entry = (pgssEntry *) hash_search(pgss_hash, &key, HASH_FIND, NULL);
 	if (entry)
 	{
-		elog(DEBUG1, "userid %d, queryid %u already exists.", key.userid, key.queryid);
+		elog(DEBUG1, "userid %u, queryid " INT64_FORMAT " already exists.",
+			 key.userid, (int64) key.queryid);
 		ret = true;
 		goto done;
 	}
@@ -1992,7 +2313,7 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 {
 	char	   *rule_file = text_to_cstring(PG_GETARG_TEXT_P(0));
 	FILE *filep;
-	bool		ret;
+	bool		ret = true;
 	char *buf, *line;
 	size_t buflen;
 
@@ -2079,10 +2400,14 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 				int j;
 				elog(DEBUG1, "sql_firewall_import_rule: complete csv record. ready for parsing.");
 
-				ret = pgss_restore(atoi(values[0]),
-						   atoi(values[1]),
-						   values[2],
-						   atol(values[3]));
+#if PG_VERSION_NUM >= 180000
+				ret = pgss_restore((Oid) pg_strtoint64(values[0]),
+								   (uint64) pg_strtoint64(values[1]),
+								   values[2], pg_strtoint64(values[3]));
+#else
+				ret = pgss_restore(atoi(values[0]), atoi(values[1]),
+								   values[2], atol(values[3]));
+#endif
 
 				for (j = 0 ; j < SQL_FIREWALL_CSV_COLS ; j++)
 				{
@@ -2112,6 +2437,7 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(ret);
 }
 
+#if PG_VERSION_NUM < 190000
 /*
  * Estimate shared memory space needed.
  */
@@ -2125,7 +2451,7 @@ pgss_memsize(void)
 
 	return size;
 }
-
+#endif
 /*
  * Allocate a new hashtable entry.
  * caller must hold an exclusive lock on pgss->lock
@@ -2301,8 +2627,12 @@ qtext_store(const char *query, int query_len,
 	*query_offset = off;
 
 	/* Now write the data into the successfully-reserved part of the file */
+#if PG_VERSION_NUM < 180000
 	fd = OpenTransientFile(PGSS_STATEMENTS_TEMP_FILE, O_RDWR | O_CREAT | PG_BINARY,
 						   S_IRUSR | S_IWUSR);
+#else
+	fd = OpenTransientFile(PGSS_STATEMENTS_TEMP_FILE, O_RDWR | O_CREAT | PG_BINARY);
+#endif
 	if (fd < 0)
 		goto error;
 
@@ -2364,7 +2694,11 @@ qtext_load_file(Size *buffer_size)
 	int			fd;
 	struct stat stat;
 
+#if PG_VERSION_NUM < 180000
 	fd = OpenTransientFile(PGSS_STATEMENTS_TEMP_FILE, O_RDONLY | PG_BINARY, 0);
+#else
+	fd = OpenTransientFile(PGSS_STATEMENTS_TEMP_FILE, O_RDONLY | PG_BINARY);
+#endif
 	if (fd < 0)
 	{
 		if (errno != ENOENT)
@@ -2695,6 +3029,7 @@ done:
 	LWLockRelease(pgss->lock);
 }
 
+#if PG_VERSION_NUM < 180000
 /*
  * AppendJumble: Append a value that is substantive in a given query to
  * the current jumble.
@@ -3253,7 +3588,7 @@ RecordConstLocation(pgssJumbleState *jstate, int location)
 		jstate->clocations_count++;
 	}
 }
-
+#endif
 /*
  * Generate a normalized version of the query string that will be used to
  * represent all similar queries.
@@ -3378,8 +3713,17 @@ fill_in_constant_lengths(pgssJumbleState *jstate, const char *query)
 	/* initialize the flex scanner --- should match raw_parser() */
 	yyscanner = scanner_init(query,
 							 &yyextra,
+#if PG_VERSION_NUM >= 180000
+							 &ScanKeywords,
+							 ScanKeywordTokens);
+#else
 							 ScanKeywords,
 							 NumScanKeywords);
+#endif
+
+#if PG_VERSION_NUM >= 180000 && PG_VERSION_NUM < 190000
+	yyextra.escape_string_warning = false;
+#endif
 
 	/* Search for each constant, in sequence */
 	for (i = 0; i < jstate->clocations_count; i++)
@@ -3387,10 +3731,23 @@ fill_in_constant_lengths(pgssJumbleState *jstate, const char *query)
 		int			loc = locs[i].location;
 		int			tok;
 
-		Assert(loc >= 0);
+		if (loc < 0)
+			continue;
 
 		if (loc <= last_loc)
-			continue;			/* Duplicate constant, ignore */
+		{
+			locs[i].length = -1;
+			continue;
+		}
+
+#if PG_VERSION_NUM >= 180000
+		/* The core already records the length of a squashed list. */
+		if (locs[i].squashed)
+		{
+			last_loc = loc;
+			continue;
+		}
+#endif
 
 		/* Lex tokens until we find the desired constant */
 		for (;;)
