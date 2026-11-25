@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- Generated from docs/md/roles.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ログインロール別のモード | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="en" href="en/roles.html">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="en/roles.html" hreflang="en" lang="en">English</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html" aria-current="page">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="ログインロール別のモード">ログインロール別のモード</h1>
+<p>クラスタ既定のモードに加え、スーパーユーザーがログインロールごとの既定値を設定できます。例えば既存アプリから順に <code>enforcing</code> を導入し、別のアプリは <code>permissive</code> の警告を見ながらルールを整備できます。</p>
+<h2 id="アプリを段階的に切り替える">アプリを段階的に切り替える</h2>
+<p><a href="quickstart.html">クイックスタート</a>の <code>app_user</code> を例にします。管理者セッションで実行します。</p>
+<pre class="sql"><code>ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;;</code></pre>
+<p><code>app_user</code> で接続し直して確認します。</p>
+<pre class="sql"><code>SHOW sql_firewall.firewall;
+SELECT count(*) FROM demo_orders;</code></pre>
+<p>モードは <code>permissive</code> です。集計が未登録なら警告が出て、結果 <code>2</code> が返ります。実際の運用では、必要な文が学習済みであることを確認してから管理者が次を実行します。</p>
+<pre class="sql"><code>ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;;</code></pre>
+<p>接続プールの既存接続にも新しい設定を反映するには、プールから再接続します。<code>SET ROLE</code> で権限を切り替えたセッションは、接続時からのモードを引き継ぎます。ルールの照合には、SQL 実行時のユーザーIDが使われます。</p>
+<h2 id="クラスタ既定に戻す">クラスタ既定に戻す</h2>
+<pre class="sql"><code>ALTER ROLE app_user RESET sql_firewall.firewall;</code></pre>
+<p>次の新規接続からクラスタ既定に従います。専用の管理作業には、スーパーユーザーの1接続だけを <code>disabled</code> にする方法もあります。その使い方は<a href="rules.html">ルールの CSV 移行</a>を参照してください。</p>
+<p>設定権限を委任していない一般ユーザーが <code>SET</code>、<code>ALTER ROLE</code>、接続オプションでファイアウォールモードを変更しようとすると、権限エラーになります。</p>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!doctype html>
+<!-- Generated from docs/md/en/installation.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Installation | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../installation.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../installation.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html" aria-current="page">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="installation">Installation</h1>
+<p>Build the extension with the <code>pg_config</code> and server headers for the PostgreSQL major version that will run it. Supported versions are <strong>9.4.x, 18.x, and 19.x</strong>. See <a href="packaging.html">Package installation</a> for the RPM and Gentoo recipes.</p>
+<h2 id="1-build-and-install">1. Build and install</h2>
+<p>Use Git, a C compiler, and GNU Make on Linux or WSL. If PostgreSQL came from a package, install the development package for the target version as well.</p>
+<pre class="sh"><code>git clone --branch main https://github.com/soudai/sql_firewall.git
+cd sql_firewall
+
+export PG_CONFIG=&quot;$(command -v pg_config)&quot;
+&quot;$PG_CONFIG&quot; --version
+&quot;$PG_CONFIG&quot; --pgxs
+make USE_PGXS=1 PG_CONFIG=&quot;$PG_CONFIG&quot;
+sudo make USE_PGXS=1 PG_CONFIG=&quot;$PG_CONFIG&quot; install</code></pre>
+<p>If you have multiple PostgreSQL installations, set <code>PG_CONFIG</code> to the absolute path for the target installation. You can omit <code>sudo</code> if your OS user can write to the installation directories. <a href="https://www.postgresql.org/docs/19/extend-pgxs.html">PostgreSQL PGXS documentation</a></p>
+<h2 id="2-preload-the-module">2. Preload the module</h2>
+<p>Edit <code>postgresql.conf</code> for the target cluster. Append <code>sql_firewall</code> to the existing list if <code>shared_preload_libraries</code> already contains other libraries. Start in <code>disabled</code> mode so you can prepare application connections before learning rules.</p>
+<pre class="conf"><code>shared_preload_libraries = &#39;sql_firewall&#39;
+sql_firewall.firewall = &#39;disabled&#39;</code></pre>
+<p>On PostgreSQL 18 and 19, leave <code>compute_query_id</code> at its default of <code>auto</code> or set it to <code>on</code>. Both preload orders were tested with <code>pg_stat_statements</code> on 18 and 19. On 9.4, put <code>pg_stat_statements</code> first.</p>
+<p>Restart the cluster to apply the preload setting. Use the service manager for a managed service, or use <code>pg_ctl</code> for a cluster that you started manually.</p>
+<pre class="sh"><code>&quot;$(&quot;$PG_CONFIG&quot; --bindir)/pg_ctl&quot; -D &quot;$PGDATA&quot; -w restart</code></pre>
+<h2 id="3-create-the-extension-and-verify-the-setup">3. Create the extension and verify the setup</h2>
+<p>Connect as a superuser to the database where you want to use the functions and views.</p>
+<pre class="sql"><code>CREATE EXTENSION sql_firewall;
+SHOW shared_preload_libraries;
+SHOW sql_firewall.firewall;
+SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p>The preload list should include <code>sql_firewall</code> and the mode should be <code>disabled</code>. Rules and enforcement apply across the cluster. The management functions and views are available in databases where you create the extension.</p>
+<p>Continue with the <a href="quickstart.html">Quickstart</a> to try learning, warning, and enforcement in a temporary cluster.</p>
+    </main>
+  </div>
+</body>
+</html>

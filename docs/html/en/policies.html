@@ -1,0 +1,111 @@
+<!doctype html>
+<!-- Generated from docs/md/en/policies.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Policies and modes | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../policies.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../policies.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html" aria-current="page">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="policies-and-modes">Policies and modes</h1>
+<p>The policy determines whether a matching rule permits or prohibits a statement. The mode determines whether sql_firewall learns rules, warns, or rejects statements.</p>
+<table>
+<thead>
+<tr class="header">
+<th><code>sql_firewall.policy</code></th>
+<th>Matching SQL</th>
+<th>Unmatched SQL</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>allowlist</code> (default)</td>
+<td>Permitted</td>
+<td>Policy violation</td>
+</tr>
+<tr class="even">
+<td><code>denylist</code></td>
+<td>Policy violation</td>
+<td>Permitted</td>
+</tr>
+</tbody>
+</table>
+<p>The policy applies to the entire cluster. Switching it requires a restart. Each policy's rules are saved separately.</p>
+<table>
+<thead>
+<tr class="header">
+<th><code>sql_firewall.firewall</code></th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>disabled</code></td>
+<td>Skip policy checks and learning.</td>
+</tr>
+<tr class="even">
+<td><code>learning</code></td>
+<td>Record statements as rules for the active policy.</td>
+</tr>
+<tr class="odd">
+<td><code>permissive</code></td>
+<td>Warn about a policy violation and continue execution.</td>
+</tr>
+<tr class="even">
+<td><code>enforcing</code></td>
+<td>Reject a policy violation with an error.</td>
+</tr>
+</tbody>
+</table>
+<p>On PostgreSQL 18 and 19, ordinary SQL uses the server's 64-bit query IDs. Different literal values can produce the same ID. Use PostgreSQL privileges and row-level security for restrictions on particular rows or values. Utility commands such as DDL use a hash of the statement text, so formatting changes can produce a different rule. Design rules around the top-level statements sent by the client.</p>
+<h2 id="try-the-denylist">Try the denylist</h2>
+<p>Use the temporary cluster after step 5 of the <a href="quickstart.html">Quickstart</a>. The commands below use the <code>admin</code> and <code>app</code> helpers from that guide to register the aggregate query on the denylist.</p>
+<h3 id="1-learn-the-statement-under-the-denylist-policy">1. Learn the statement under the denylist policy</h3>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w restart \
+    -o &#39;-c sql_firewall.policy=denylist&#39;
+admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>The query returns <code>2</code> and is added to the denylist for <code>app_user</code>. In denylist learning mode, run only the statements you intend to prohibit.</p>
+<h3 id="2-observe-the-warning-and-rejection">2. Observe the warning and rejection</h3>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>The query emits a warning and returns <code>2</code>. Switch to <code>enforcing</code> and open new application connections.</p>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;&quot;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>The lookup returns <code>pending</code>. The aggregate query fails with <code>ERROR:  Prohibited SQL statement</code>.</p>
+<h3 id="3-switch-back-to-the-allowlist">3. Switch back to the allowlist</h3>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w restart \
+    -o &#39;-c sql_firewall.policy=allowlist&#39;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;</code></pre>
+<p>The server loads the allowlist rules again, and the lookup returns <code>pending</code>.</p>
+    </main>
+  </div>
+</body>
+</html>

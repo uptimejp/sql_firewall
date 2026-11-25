@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- Generated from docs/md/en/roles.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login role modes | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../roles.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../roles.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html" aria-current="page">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="login-role-modes">Login role modes</h1>
+<p>A superuser can assign a login role its own default firewall mode. This lets you roll out <code>enforcing</code> for one application while another stays in <code>permissive</code> mode as you review its warnings and build its rules.</p>
+<h2 id="roll-out-enforcement-for-one-application">Roll out enforcement for one application</h2>
+<p>Use <code>app_user</code> from the <a href="quickstart.html">Quickstart</a>. In an admin session, run the following command.</p>
+<pre class="sql"><code>ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;;</code></pre>
+<p>Reconnect as <code>app_user</code> and check the mode and query result.</p>
+<pre class="sql"><code>SHOW sql_firewall.firewall;
+SELECT count(*) FROM demo_orders;</code></pre>
+<p>The mode is <code>permissive</code>. If the aggregate query has no rule in the allowlist, it emits a warning and returns <code>2</code>. After verifying that the application has learned the statements it needs, switch the role to <code>enforcing</code>.</p>
+<pre class="sql"><code>ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;;</code></pre>
+<p>Recycle existing connections in your connection pool to apply the new default. <code>SET ROLE</code> keeps the firewall mode already in effect for the session. The rule lookup uses the effective user ID when SQL runs.</p>
+<h2 id="restore-the-cluster-default">Restore the cluster default</h2>
+<pre class="sql"><code>ALTER ROLE app_user RESET sql_firewall.firewall;</code></pre>
+<p>The next connection uses the cluster default. A superuser can also put an individual maintenance connection in <code>disabled</code> mode. See <a href="rules.html">Promoting rules with CSV</a> for an example.</p>
+<p>An ordinary user without permission to set the parameter receives a permission error when attempting to change their firewall mode through <code>SET</code>, <code>ALTER ROLE</code>, or connection options.</p>
+    </main>
+  </div>
+</body>
+</html>

@@ -1,0 +1,162 @@
+<!doctype html>
+<!-- Generated from docs/md/reference.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>リファレンスとトラブルシューティング | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="en" href="en/reference.html">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="en/reference.html" hreflang="en" lang="en">English</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html" aria-current="page">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="リファレンスとトラブルシューティング">リファレンスとトラブルシューティング</h1>
+<h2 id="設定パラメータ">設定パラメータ</h2>
+<table>
+<thead>
+<tr class="header">
+<th>パラメータ</th>
+<th>既定値</th>
+<th>適用範囲</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>shared_preload_libraries</code></td>
+<td>PostgreSQL の設定に従う</td>
+<td><code>sql_firewall</code> を追加し、クラスタを再起動</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall.firewall</code></td>
+<td><code>disabled</code></td>
+<td>クラスタ既定、ログインロール、スーパーユーザーのセッション。モードは <code>disabled</code> / <code>learning</code> / <code>permissive</code> / <code>enforcing</code></td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall.policy</code></td>
+<td><code>allowlist</code></td>
+<td>クラスタ単位。<code>denylist</code> に切り替えるには再起動</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall.max</code></td>
+<td><code>5000</code></td>
+<td>クラスタのルール数の上限。最小値は <code>100</code>。変更後は再起動</td>
+</tr>
+<tr class="odd">
+<td><code>compute_query_id</code>（18・19）</td>
+<td><code>auto</code></td>
+<td>実行時のクエリIDに <code>auto</code> または <code>on</code> が必要</td>
+</tr>
+</tbody>
+</table>
+<h2 id="ルールとカウンターを見る">ルールとカウンターを見る</h2>
+<p>拡張を作成したデータベースで、管理者セッションから実行します。クラスタ既定が <code>enforcing</code> の場合は、管理作業用の接続だけ <code>disabled</code> にする方法もあります。</p>
+<pre class="sql"><code>SELECT userid, queryid, query, calls
+FROM sql_firewall.sql_firewall_statements
+ORDER BY calls DESC, userid, queryid
+LIMIT 10;
+
+SELECT sql_warning, sql_error
+FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p><code>calls</code> は対応するルールに記録された実行回数です。<code>sql_warning</code> は <code>permissive</code> の警告数、<code>sql_error</code> は <code>enforcing</code> の拒否数です。カウンターはクラスタで共有されます。</p>
+<h2 id="管理関数">管理関数</h2>
+<table>
+<thead>
+<tr class="header">
+<th>関数</th>
+<th>動作</th>
+<th>実行条件</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>sql_firewall_export_rule(text)</code></td>
+<td>現在のポリシーのルールをサーバー側の CSV へ書き出す</td>
+<td>スーパーユーザー、<code>disabled</code> のセッション</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall_import_rule(text)</code></td>
+<td>サーバー側の CSV からルールを追加</td>
+<td>スーパーユーザー、<code>disabled</code> のセッション</td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall_stat_reset()</code></td>
+<td>警告・エラーのカウンターをリセット</td>
+<td>スーパーユーザー</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall_reset()</code></td>
+<td>現在のポリシーのルールをすべて消去</td>
+<td>スーパーユーザー、<code>disabled</code> のセッション</td>
+</tr>
+</tbody>
+</table>
+<p>例えば、一時クラスタで警告・エラーのカウンターだけをリセットするには次を実行します。<code>sql_firewall_reset()</code> はルール自体を消去する別の操作です。</p>
+<pre class="sql"><code>SELECT sql_firewall_stat_reset();
+SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p>直後の値は、同時に警告・拒否が発生していなければ <code>0 | 0</code> です。</p>
+<p>一時クラスタで現在のポリシーの全ルールを消去するには、スーパーユーザーが <code>disabled</code> のセッションで次を実行します。</p>
+<pre class="sql"><code>SELECT sql_firewall_reset();
+SELECT count(*) FROM sql_firewall.sql_firewall_statements;</code></pre>
+<p>同時に学習・取り込みをしていなければ結果は <code>0</code> です。クラスタ全体のルールを消すため、既存のルールを使う環境では先に<a href="rules.html">CSV に書き出す</a>と復元に使えます。</p>
+<h2 id="よくあるエラー">よくあるエラー</h2>
+<table>
+<thead>
+<tr class="header">
+<th>症状</th>
+<th>確認すること</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>sql_firewall must be loaded via shared_preload_libraries</code></td>
+<td>プリロードに拡張を追加し、正しいクラスタを再起動したか</td>
+</tr>
+<tr class="even">
+<td><code>could not access file "sql_firewall"</code></td>
+<td>対象の <code>pg_config</code> でビルドとインストールを行ったか</td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall requires compute_query_id to be auto or on</code></td>
+<td>PostgreSQL 18・19 の設定が <code>auto</code> または <code>on</code> か</td>
+</tr>
+<tr class="even">
+<td>想定していた SQL が <code>Prohibited SQL statement</code> になる</td>
+<td>接続ロール、現在のポリシーとモード、クエリID、DDL の書式が学習時と合っているか</td>
+</tr>
+<tr class="odd">
+<td>ロールのモードが切り替わらない</td>
+<td><code>ALTER ROLE</code> を実行したあと、新規接続で試したか</td>
+</tr>
+<tr class="even">
+<td>CSV を移したあとルールが一致しない</td>
+<td>移行元と先のメジャーバージョン、ポリシー、ロールとオブジェクトの OID が一致しているか</td>
+</tr>
+</tbody>
+</table>
+    </main>
+  </div>
+</body>
+</html>
