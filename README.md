@@ -56,6 +56,8 @@ after installing sql_firewall and pg_stat_statements for that version.
 PG_CONFIG=$PGHOME/bin/pg_config sh tests/smoke.sh
 ```
 
+See [Building an RPM](packaging/rpm/README.md) for the PGDG package recipe.
+
 ## Configuration
 
 Set these values in `postgresql.conf`.
