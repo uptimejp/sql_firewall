@@ -57,6 +57,7 @@ PG_CONFIG=$PGHOME/bin/pg_config sh tests/smoke.sh
 ```
 
 See [Building an RPM](packaging/rpm/README.md) for the PGDG package recipe.
+See the [Gentoo overlay recipe](packaging/gentoo/README.md) for Portage.
 
 ## Configuration
 
