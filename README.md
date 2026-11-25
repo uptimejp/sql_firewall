@@ -1,9 +1,6 @@
+# sql_firewall
 
-sql_firewall
-============
-
-Overview
---------
+## Overview
 
 sql_firewall is a PostgreSQL extension which is intended to protect
 database from SQL injections or unexpected queries.
@@ -12,8 +9,7 @@ sql_firewall module learns queries which can be executed, and
 prevents/warns on executing queries which are not found in the learned
 firewall rule.
 
-How it works
-------------
+## How it works
 
 sql_firewall can take one of four modes specified in
 sql_firewall.firewall parameter: "learning", "enforcing",
@@ -32,9 +28,7 @@ In the "permissive" mode, sql_firewall checks queries as well, but
 allows to execute even not in the firewall rules. And produces
 warnings if the queries are not in the rules.
 
-
-Compatibility
--------------
+## Compatibility
 
 sql_firewall supports PostgreSQL 9.4.x, 18.x and 19.x.
 
@@ -44,34 +38,39 @@ Relearn rules in the destination cluster after a major-version upgrade.
 Rule IDs in saved or exported rules are specific to the PostgreSQL major
 version and may also depend on object OIDs.
 
-
-Installation
-------------
+## Installation
 
 sql_firewall can be built as a PostgreSQL extension.
 
-    $ export PATH=$PGHOME/bin:$PATH
-    $ export USE_PGXS=1
-    $ make
-    $ sudo make install
+```sh
+export PATH=$PGHOME/bin:$PATH
+export USE_PGXS=1
+make
+sudo make install
+```
 
 On PostgreSQL 18 or 19, run the smoke test as an unprivileged OS user
 after installing sql_firewall and pg_stat_statements for that version.
 
-    $ PG_CONFIG=$PGHOME/bin/pg_config sh tests/smoke.sh
+```sh
+PG_CONFIG=$PGHOME/bin/pg_config sh tests/smoke.sh
+```
 
+## Configuration
 
-Configuration
--------------
+Set these values in `postgresql.conf`.
 
-     $ vi $PGDATA/postgresql.conf
-     <add>
-     shared_preload_libraries = 'sql_firewall'
-     sql_firewall.firewall = 'learning'
-     </add>
-     $ pg_ctl -D $PGDATA restart
-     $ psql mydb
-     mydb=# create extension sql_firewall;
+```conf
+shared_preload_libraries = 'sql_firewall'
+sql_firewall.firewall = 'learning'
+```
+
+Restart PostgreSQL and create the extension in the desired database.
+
+```sh
+pg_ctl -D "$PGDATA" restart
+psql mydb -c 'CREATE EXTENSION sql_firewall'
+```
 
 sql_firewall would check all queries incoming to not only the specific
 database where the module is installed, but all the databases in the
@@ -80,38 +79,40 @@ entire PostgreSQL cluster.
 Even though, the views and functions in the module would be available
 only on the installed database.
 
+## GUC Parameters
 
-GUC Parameters
---------------
-
-* shared_preload_libraries
+- `shared_preload_libraries`
 
   sql_firewall module needs to be loaded in the
-  shared_preload_libraries parameter as following:
+  shared_preload_libraries parameter as shown below.
 
-     shared_preload_libraries = 'sql_firewall'
+  ```conf
+  shared_preload_libraries = 'sql_firewall'
+  ```
 
-   On PostgreSQL 18 and 19, sql_firewall and pg_stat_statements can be
-   preloaded in either order. Both use the query ID computed by PostgreSQL.
+  On PostgreSQL 18 and 19, sql_firewall and pg_stat_statements can be
+  preloaded in either order. Both use the query ID computed by PostgreSQL.
 
-   On PostgreSQL 9.4, preload pg_stat_statements first to avoid an assertion
-   failure in pg_stat_statements builds with assertion checking enabled.
+  On PostgreSQL 9.4, preload pg_stat_statements first to avoid an assertion
+  failure in pg_stat_statements builds with assertion checking enabled.
 
-     shared_preload_libraries = 'pg_stat_statements,sql_firewall'
+  ```conf
+  shared_preload_libraries = 'pg_stat_statements,sql_firewall'
+  ```
 
-* compute_query_id (PostgreSQL 18 and 19)
+- `compute_query_id` (PostgreSQL 18 and 19)
 
   Keep the default setting of 'auto', or explicitly set it to 'on'.
   With SQL Firewall active and compute_query_id set to 'off', queries
   requiring a query ID are rejected with a configuration error.
 
-* sql_firewall.firewall
+- `sql_firewall.firewall`
 
   sql_firewall.firewall is able to take one of the following values:
   'disabled', 'learning', 'permissive' and 'enforcing'.
   The default value is 'disabled'.
 
-* sql_firewall.max
+- `sql_firewall.max`
 
   Number of queries the SQL Firewall can learn.
   It can take an int value between 100 and INT_MAX.
@@ -119,23 +120,21 @@ GUC Parameters
   The queries which exceed this value in the "learning" mode would never
   be learned.
 
+## Functions
 
-Functions
----------
-
-* sql_firewall_reset()
+- `sql_firewall_reset()`
 
   sql_firewall_reset() clears the firewall rules.
 
   This function is available only under the disabled mode with
   superuser privilege.
 
-* sql_firewall_stat_reset()
+- `sql_firewall_stat_reset()`
 
-  sql_firewall_reset() clears the counters of warning and error. Only
+  sql_firewall_stat_reset() clears the counters of warning and error. Only
   available with superuser privilege.
 
-* sql_firewall_export_rule('/path/to/rule.txt')
+- `sql_firewall_export_rule('/path/to/rule.txt')`
 
   sql_firewall_export_rule() writes the firewall rules in the
   specified CSV file.
@@ -143,7 +142,7 @@ Functions
   This function is available only under the disabled mode with
   superuser privilege.
 
-* sql_firewall_import_rule('/path/to/rule.txt')
+- `sql_firewall_import_rule('/path/to/rule.txt')`
 
   sql_firewall_import_rule() reads the firewall rules from the
   specified CSV file.
@@ -151,24 +150,24 @@ Functions
   This function is available only under the disabled mode with
   superuser privilege.
 
+## Views
 
-Views
------
-
-* sql_firewall.sql_firewall_statements
+- `sql_firewall.sql_firewall_statements`
 
   sql_firewall_statements view shows the firewall rules and execution
   counter for each query.
 
-    postgres=# select * from sql_firewall.sql_firewall_statements;
-     userid |  queryid   |              query              | calls
-    --------+------------+---------------------------------+-------
-         10 | 3294787656 | select * from k1 where uid = ?; |     4
-    (1 row)
-    
-    postgres=#
+  ```text
+  postgres=# select * from sql_firewall.sql_firewall_statements;
+   userid |  queryid   |              query              | calls
+  --------+------------+---------------------------------+-------
+       10 | 3294787656 | select * from k1 where uid = ?; |     4
+  (1 row)
 
-* sql_firewall.sql_firewall_stat
+  postgres=#
+  ```
+
+- `sql_firewall.sql_firewall_stat`
 
   sql_firewall_stat view has two counters: "sql_warning" and
   "sql_error".
@@ -179,67 +178,68 @@ Views
   "sql_error" shows number of prevented queries in the "enforcing"
   mode.
 
-    postgres=# select * from sql_firewall.sql_firewall_stat;
-     sql_warning | sql_error
-    -------------+-----------
-               2 |         1
-    (1 row)
-    
-    postgres=# 
+  ```text
+  postgres=# select * from sql_firewall.sql_firewall_stat;
+   sql_warning | sql_error
+  -------------+-----------
+             2 |         1
+  (1 row)
 
+  postgres=#
+  ```
 
-Examples
---------
+## Examples
 
-* Permissive mode
+- Permissive mode
 
-    postgres=# select * from sql_firewall.sql_firewall_statements;
-    WARNING:  Prohibited SQL statement
-     userid |  queryid   |              query              | calls
-    --------+------------+---------------------------------+-------
-         10 | 3294787656 | select * from k1 where uid = 1; |     1
-    (1 row)
-    
-    postgres=# select * from k1 where uid = 1;
-     uid |    uname
-    -----+-------------
-       1 | Park Gyu-ri
-    (1 row)
-    
-    postgres=# select * from k1 where uid = 3;
-     uid |   uname
-    -----+-----------
-       3 | Goo Ha-ra
-    (1 row)
-    
-    postgres=# select * from k1 where uid = 3 or 1 = 1;
-    WARNING:  Prohibited SQL statement
-     uid |     uname
-    -----+----------------
-       1 | Park Gyu-ri
-       2 | Nicole Jung
-       3 | Goo Ha-ra
-       4 | Han Seung-yeon
-       5 | Kang Ji-young
-    (5 rows)
-  
-    postgres=# 
+  ```text
+  postgres=# select * from sql_firewall.sql_firewall_statements;
+  WARNING:  Prohibited SQL statement
+   userid |  queryid   |              query              | calls
+  --------+------------+---------------------------------+-------
+       10 | 3294787656 | select * from k1 where uid = 1; |     1
+  (1 row)
 
-* Enforcing mode
+  postgres=# select * from k1 where uid = 1;
+   uid |    uname
+  -----+-------------
+     1 | Park Gyu-ri
+  (1 row)
 
-    postgres=# select * from k1 where uid = 3;
-     uid |   uname
-    -----+-----------
-       3 | Goo Ha-ra
-    (1 row)
-    
-    postgres=# select * from k1 where uid = 3 or 1 = 1;
-    ERROR:  Prohibited SQL statement
-    postgres=# 
+  postgres=# select * from k1 where uid = 3;
+   uid |   uname
+  -----+-----------
+     3 | Goo Ha-ra
+  (1 row)
 
+  postgres=# select * from k1 where uid = 3 or 1 = 1;
+  WARNING:  Prohibited SQL statement
+   uid |     uname
+  -----+----------------
+     1 | Park Gyu-ri
+     2 | Nicole Jung
+     3 | Goo Ha-ra
+     4 | Han Seung-yeon
+     5 | Kang Ji-young
+  (5 rows)
 
-Authors
--------
+  postgres=#
+  ```
+
+- Enforcing mode
+
+  ```text
+  postgres=# select * from k1 where uid = 3;
+   uid |   uname
+  -----+-----------
+     3 | Goo Ha-ra
+  (1 row)
+
+  postgres=# select * from k1 where uid = 3 or 1 = 1;
+  ERROR:  Prohibited SQL statement
+  postgres=#
+  ```
+
+## Authors
 
 Satoshi Nagayasu <snaga@uptime.jp>
-
