@@ -1,0 +1,162 @@
+<!doctype html>
+<!-- Generated from docs/md/en/reference.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reference and troubleshooting | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../reference.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../reference.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html" aria-current="page">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="reference-and-troubleshooting">Reference and troubleshooting</h1>
+<h2 id="configuration-parameters">Configuration parameters</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Parameter</th>
+<th>Default</th>
+<th>Where it applies</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>shared_preload_libraries</code></td>
+<td>PostgreSQL setting</td>
+<td>Add <code>sql_firewall</code> and restart the cluster.</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall.firewall</code></td>
+<td><code>disabled</code></td>
+<td>Cluster default, login role default, or superuser session. Modes are <code>disabled</code>, <code>learning</code>, <code>permissive</code>, and <code>enforcing</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall.policy</code></td>
+<td><code>allowlist</code></td>
+<td>Cluster-wide. Switching to <code>denylist</code> requires a restart.</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall.max</code></td>
+<td><code>5000</code></td>
+<td>Maximum number of rules in the cluster. The minimum is <code>100</code>. Restart after changing it.</td>
+</tr>
+<tr class="odd">
+<td><code>compute_query_id</code> (18 and 19)</td>
+<td><code>auto</code></td>
+<td>Use <code>auto</code> or <code>on</code> to compute query IDs.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="inspect-rules-and-counters">Inspect rules and counters</h2>
+<p>Run these queries from an admin session in the database where you created the extension. If the cluster default is <code>enforcing</code>, you can use <code>disabled</code> for the individual maintenance connection.</p>
+<pre class="sql"><code>SELECT userid, queryid, query, calls
+FROM sql_firewall.sql_firewall_statements
+ORDER BY calls DESC, userid, queryid
+LIMIT 10;
+
+SELECT sql_warning, sql_error
+FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p><code>calls</code> is the execution count recorded for a rule. <code>sql_warning</code> counts warnings in <code>permissive</code> mode. <code>sql_error</code> counts rejections in <code>enforcing</code> mode. The cluster shares these counters across sessions.</p>
+<h2 id="management-functions">Management functions</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Function</th>
+<th>What it does</th>
+<th>Requirements</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>sql_firewall_export_rule(text)</code></td>
+<td>Export the active policy's rules to a server-side CSV file.</td>
+<td>Superuser session in <code>disabled</code> mode.</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall_import_rule(text)</code></td>
+<td>Add rules from a server-side CSV file.</td>
+<td>Superuser session in <code>disabled</code> mode.</td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall_stat_reset()</code></td>
+<td>Reset the warning and error counters.</td>
+<td>Superuser.</td>
+</tr>
+<tr class="even">
+<td><code>sql_firewall_reset()</code></td>
+<td>Clear all rules for the active policy.</td>
+<td>Superuser session in <code>disabled</code> mode.</td>
+</tr>
+</tbody>
+</table>
+<p>To reset the warning and error counters on a temporary cluster, run the following commands.</p>
+<pre class="sql"><code>SELECT sql_firewall_stat_reset();
+SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p>If no other sessions raise warnings or rejections at the same time, the result is <code>0 | 0</code>.</p>
+<p>To clear all rules for the active policy on a temporary cluster, use a superuser session in <code>disabled</code> mode.</p>
+<pre class="sql"><code>SELECT sql_firewall_reset();
+SELECT count(*) FROM sql_firewall.sql_firewall_statements;</code></pre>
+<p>If no rules are learned or imported concurrently, the count is <code>0</code>. This clears rules across the cluster. <a href="rules.html">Export the rules to CSV</a> first if you need to restore them later.</p>
+<h2 id="common-errors">Common errors</h2>
+<table>
+<thead>
+<tr class="header">
+<th>Symptom</th>
+<th>What to check</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>sql_firewall must be loaded via shared_preload_libraries</code></td>
+<td>Add the module to the preload list and restart the correct cluster.</td>
+</tr>
+<tr class="even">
+<td><code>could not access file "sql_firewall"</code></td>
+<td>Check that you built and installed with the target server's <code>pg_config</code>.</td>
+</tr>
+<tr class="odd">
+<td><code>sql_firewall requires compute_query_id to be auto or on</code></td>
+<td>Check that PostgreSQL 18 or 19 uses <code>auto</code> or <code>on</code>.</td>
+</tr>
+<tr class="even">
+<td>An expected query gets <code>Prohibited SQL statement</code></td>
+<td>Check the connection role, active policy and mode, query ID, and whether the DDL text matches what was learned.</td>
+</tr>
+<tr class="odd">
+<td>A role's mode did not change</td>
+<td>Open a new connection after running <code>ALTER ROLE</code>.</td>
+</tr>
+<tr class="even">
+<td>Rules no longer match after moving a CSV</td>
+<td>Compare the PostgreSQL major version, policy, role OIDs, and object OIDs across both environments.</td>
+</tr>
+</tbody>
+</table>
+    </main>
+  </div>
+</body>
+</html>

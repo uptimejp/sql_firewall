@@ -1,0 +1,82 @@
+<!doctype html>
+<!-- Generated from docs/md/en/index.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sql_firewall guide | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../index.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../index.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html" aria-current="page">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="sql_firewall-guide">sql_firewall guide</h1>
+<p>sql_firewall is a PostgreSQL extension that warns about or rejects SQL according to rules for each role. You can learn the statements an application normally runs and allow them, or register specific statement patterns to reject.</p>
+<p><strong>Supported PostgreSQL versions</strong> 9.4.x, 18.x, and 19.x</p>
+<table>
+<thead>
+<tr class="header">
+<th>What you want to do</th>
+<th>Guide</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>Build and load the extension</td>
+<td><a href="installation.html">Installation</a></td>
+</tr>
+<tr class="even">
+<td>Try learning, warnings, and rejections on a temporary cluster</td>
+<td><a href="quickstart.html">Quickstart</a></td>
+</tr>
+<tr class="odd">
+<td>Choose an allowlist or a denylist</td>
+<td><a href="policies.html">Policies and modes</a></td>
+</tr>
+<tr class="even">
+<td>Set different modes for application and maintenance logins</td>
+<td><a href="roles.html">Login role modes</a></td>
+</tr>
+<tr class="odd">
+<td>Add rules learned in staging to production</td>
+<td><a href="rules.html">Promoting rules with CSV</a></td>
+</tr>
+<tr class="even">
+<td>Inspect rules and counters or look up a setting</td>
+<td><a href="reference.html">Reference and troubleshooting</a></td>
+</tr>
+<tr class="odd">
+<td>Install from an RPM or a Gentoo ebuild</td>
+<td><a href="packaging.html">Package installation</a></td>
+</tr>
+</tbody>
+</table>
+<p>A rule is keyed by the role OID (<code>userid</code>) and query ID (<code>queryid</code>). Two <code>SELECT</code> statements that differ only in a constant can share a query ID. PostgreSQL privileges and row-level security continue to apply.</p>
+<p><a href="https://github.com/soudai/sql_firewall/tree/main">Repository</a> · <a href="https://github.com/uptimejp/sql_firewall/issues">Upstream issues</a></p>
+    </main>
+  </div>
+</body>
+</html>

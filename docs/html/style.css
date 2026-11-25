@@ -57,6 +57,8 @@ a:focus-visible { outline: 2px solid var(--link); outline-offset: 3px; }
   text-decoration: none;
 }
 
+.header-links { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+
 .layout {
   max-width: 74rem;
   margin: auto;
