@@ -143,8 +143,7 @@ only on the installed database.
 
   sql_firewall_reset() clears the firewall rules.
 
-  This function is available only under the disabled mode with
-  superuser privilege.
+  A superuser can call it from a session in `disabled` mode.
 
 - `sql_firewall_stat_reset()`
 
@@ -156,16 +155,49 @@ only on the installed database.
   sql_firewall_export_rule() writes the firewall rules in the
   specified CSV file.
 
-  This function is available only under the disabled mode with
-  superuser privilege.
+  A superuser can call it from a session in `disabled` mode.
 
 - `sql_firewall_import_rule('/path/to/rule.txt')`
 
   sql_firewall_import_rule() reads the firewall rules from the
   specified CSV file.
 
-  This function is available only under the disabled mode with
-  superuser privilege.
+  A superuser can call it from a session in `disabled` mode.
+  Import validates the CSV and checks the rule limit before adding rules.
+  Existing rules and their counters are retained. It returns true when
+  the updated rule snapshot has been written to disk.
+
+## Promoting allowlist rules
+
+Learn rules in staging using the application's login role. Use the same
+PostgreSQL major version and rule policy in both environments. The CSV
+contains user OIDs and query IDs. Verify that the source and destination
+assign the same OIDs to the relevant roles and objects. Training against
+a physical copy of the destination cluster preserves those OIDs.
+
+From an existing superuser account, set `disabled` only for the export or
+import connection. Production application sessions can stay in
+`enforcing` mode while the shared rule table is updated.
+
+```sh
+PGOPTIONS='-c sql_firewall.firewall=disabled' \
+    psql "$STAGING_DSN" -v ON_ERROR_STOP=1 \
+    -c "SELECT sql_firewall_export_rule('/path/to/firewall.csv')"
+```
+
+Copy the exported CSV to the destination server at a path readable by
+the PostgreSQL server process. Then run the import on the destination.
+
+```sh
+PGOPTIONS='-c sql_firewall.firewall=disabled' \
+    psql "$PRODUCTION_DSN" -v ON_ERROR_STOP=1 \
+    -c "SELECT sql_firewall_import_rule('/path/to/firewall.csv')"
+```
+
+Check that the import returns `t` and verify the added statements through
+the application role. A false result means the rules were added in memory
+but the snapshot could not be persisted. Check the server log for the
+file error and rerun the import after correcting it.
 
 ## Views
 

@@ -83,9 +83,11 @@
 #include "utils/tuplestore.h"
 #else
 #include "access/hash.h"
+#include "utils/int8.h"
 #endif
 #include "executor/instrument.h"
 #include "funcapi.h"
+#include "lib/stringinfo.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
 #include "parser/analyze.h"
@@ -349,7 +351,7 @@ static void pgss_shmem_startup(void);
 static void pgss_shmem_request(void);
 #endif
 #endif
-static void update_firewall_rule_file(void);
+static bool update_firewall_rule_file(void);
 static void update_firewall_counter_file(void);
 static void pgss_shmem_shutdown(int code, Datum arg);
 #if PG_VERSION_NUM < 180000
@@ -397,8 +399,6 @@ static pgssEntry *entry_alloc(pgssHashKey *key, Size query_offset, int query_len
 			int encoding);
 static bool qtext_store(const char *query, int query_len,
 			Size *query_offset, int *gc_count);
-static bool pgss_restore(Oid userid, FirewallQueryId queryid, const char *query,
-			 int64 calls);
 static char *qtext_load_file(Size *buffer_size);
 static char *qtext_fetch(Size query_offset, int query_len,
 			char *buffer, Size buffer_size);
@@ -804,7 +804,7 @@ fail:
 }
 
 /* Serialize the in-memory rule table for shutdown or an administrative command. */
-static void
+static bool
 update_firewall_rule_file(void)
 {
 	FILE	   *file;
@@ -843,7 +843,11 @@ update_firewall_rule_file(void)
 									   qbuffer, qbuffer_size);
 
 		if (qstr == NULL)
-			continue;			/* Ignore any entries with bogus texts */
+		{
+			hash_seq_term(&hash_seq);
+			errno = EIO;
+			goto error;
+		}
 
 		if (fwrite(entry, sizeof(pgssEntry), 1, file) != 1 ||
 			fwrite(qstr, 1, len + 1, file) != len + 1)
@@ -874,7 +878,7 @@ update_firewall_rule_file(void)
 
 	pgss->rules_dirty = false;
 	LWLockRelease(pgss->lock);
-	return;
+	return true;
 
 error:
 	ereport(LOG,
@@ -886,6 +890,7 @@ error:
 	if (file)
 		FreeFile(file);
 	LWLockRelease(pgss->lock);
+	return false;
 }
 
 static void
@@ -1985,212 +1990,167 @@ sql_firewall_export_rule(PG_FUNCTION_ARGS)
 	PG_RETURN_BOOL(true);
 }
 
-static bool
-pgss_restore(Oid userid, FirewallQueryId queryid, const char *query, int64 calls)
+typedef struct RuleImportEntry
 {
 	pgssHashKey key;
-	pgssEntry  *entry;
+	char	   *query;
 	int			query_len;
 	Size		query_offset;
-	int			gc_count;
-	bool		stored;
-	int			encoding = GetDatabaseEncoding();
-	bool ret = false;
+	int64		calls;
+} RuleImportEntry;
 
-	/*
-	 * 10 | 3294787656 | select * from k1 where uid = ?; |     2
-	 */
-	key.userid = userid;
-	key.queryid = queryid;
+/* Read one four-column CSV record, including newlines inside quoted fields. */
+static bool
+read_rule_record(FILE *file, char **fields, int record)
+{
+	StringInfoData field;
+	int			ch = getc(file);
+	int			i;
 
-	/*
-	 * Check the entry in the hash table.
-	 */
-	LWLockAcquire(pgss->lock, LW_SHARED);
+	if (ch == EOF)
+		return false;
 
-	entry = (pgssEntry *) hash_search(pgss_hash, &key, HASH_FIND, NULL);
-	if (entry)
+	initStringInfo(&field);
+	for (i = 0; i < SQL_FIREWALL_CSV_COLS; i++)
 	{
-		elog(DEBUG1, "userid %u, queryid " INT64_FORMAT " already exists.",
-			 key.userid, (int64) key.queryid);
-		ret = true;
-		goto done;
+		bool		quoted = (ch == '"');
+
+		resetStringInfo(&field);
+		if (quoted)
+			ch = getc(file);
+		while (ch != EOF)
+		{
+			if (quoted && ch == '"')
+			{
+				ch = getc(file);
+				if (ch != '"')
+				{
+					quoted = false;
+					break;
+				}
+			}
+			else if (!quoted && (ch == ',' || ch == '\r' || ch == '\n'))
+				break;
+			else if (ch == '\0' || (!quoted && ch == '"'))
+				goto invalid;
+
+			appendStringInfoChar(&field, ch);
+			ch = getc(file);
+		}
+		if (quoted)
+			goto invalid;
+		fields[i] = pstrdup(field.data);
+
+		if (i < SQL_FIREWALL_CSV_COLS - 1)
+		{
+			if (ch != ',')
+				goto invalid;
+			ch = getc(file);
+		}
+		else if (ch != EOF && ch != '\r' && ch != '\n')
+			goto invalid;
 	}
 
-	LWLockRelease(pgss->lock);
-
-	/*
-	 * Restore the entry
-	 */
-	LWLockAcquire(pgss->lock, LW_EXCLUSIVE);
-
-	query_len = strlen(query);
-	stored = qtext_store(query, query_len, &query_offset, &gc_count);
-	if (!stored)
+	if (ch == '\r')
 	{
-		elog(ERROR, "Could not store a query text to the file.");
-		goto done;
+		ch = getc(file);
+		if (ch != EOF && ch != '\n')
+			ungetc(ch, file);
 	}
 
-	entry = entry_alloc(&key, query_offset, query_len, encoding);
-	if (!entry)
-	{
-		elog(ERROR, "Could not allocate an entry in the hash table.");
-		goto done;
-	}
+	pfree(field.data);
+	return true;
 
-	SpinLockAcquire(&entry->mutex);
-	entry->counters.calls = calls;
-	SpinLockRelease(&entry->mutex);
-	pgss->rules_dirty = true;
-
-	if (need_gc_qtexts())
-		gc_qtexts();
-
-	ret = true;
-
-done:
-	LWLockRelease(pgss->lock);
-	return ret;
+invalid:
+	ereport(ERROR,
+			(errcode(ERRCODE_BAD_COPY_FILE_FORMAT),
+			 errmsg("invalid SQL firewall CSV record %d", record)));
+	return false;
 }
 
-#define CSV_DEFAULT     1
-#define CSV_SEPARATOR   2
-#define CSV_NON_QUOTED  3
-#define CSV_QUOTED      4
-
-static int
-parse_csv_values(const char *buf, char **values)
+static int64
+parse_rule_number(const char *value)
 {
-	int i;
-	int cols = 1;
-	int off = 0;
-	int buflen = strlen(buf);
-	int len = 0;
-	int mode = CSV_DEFAULT;
+#if PG_VERSION_NUM >= 180000
+	return pg_strtoint64(value);
+#else
+	int64		number;
 
-	int buf2len = 512;
-	char *buf2 = palloc(buf2len);
-	memset(buf2, 0, buf2len);
+	scanint8(value, false, &number);
+	return number;
+#endif
+}
 
-	for (i = 0 ; i < buflen ; i++)
+/*
+ * Validate capacity and write query texts before publishing any rules. A
+ * concurrent import or learner can add an existing key only before we lock.
+ */
+static void
+apply_rule_import(HTAB *rules)
+{
+	HASH_SEQ_STATUS scan;
+	RuleImportEntry *rule;
+	long		additions = 0;
+	int			encoding = GetDatabaseEncoding();
+
+	LWLockAcquire(pgss->lock, LW_EXCLUSIVE);
+	hash_seq_init(&scan, rules);
+	while ((rule = hash_seq_search(&scan)) != NULL)
 	{
-		int field_end = false;
-
-		switch (buf[i])
+		if (hash_search(pgss_hash, &rule->key, HASH_FIND, NULL))
 		{
-			case '"':
-				switch (mode)
-				{
-					case CSV_DEFAULT:
-					case CSV_SEPARATOR:
-						mode = CSV_QUOTED;
-						off++;
-						/* len should still be zero. */
-						break;
-
-					case CSV_NON_QUOTED:
-						/* it's not correct csv format, but ok. */
-						buf2[len++] = buf[i];
-						break;
-
-					case CSV_QUOTED:
-						if (i < buflen - 1 && buf[i+1] == '"')
-						{
-							/* skip next char, and continue reading */
-							i++;
-							buf2[len++] = buf[i];
-						}
-						else
-						{
-							field_end = true;
-						
-							mode = CSV_DEFAULT;
-						}
-						break;
-				}
-				break;
-
-			case ',':
-				switch (mode)
-				{
-					case CSV_DEFAULT:
-						break;
-
-					case CSV_SEPARATOR:
-					case CSV_NON_QUOTED:
-						/* end of the field */
-						field_end = true;
-						
-						mode = CSV_SEPARATOR;
-						break;
-
-					case CSV_QUOTED:
-						buf2[len++] = buf[i];
-						break;
-				}
-				break;
-
-			default:
-				switch (mode)
-				{
-					case CSV_DEFAULT:
-					case CSV_SEPARATOR:
-						off = i;
-						mode = CSV_NON_QUOTED;
-						break;
-				}
-				buf2[len++] = buf[i];
-				break;
+			pfree(rule->query);
+			rule->query = NULL;
 		}
-		if (field_end == true)
-		{
-			/* end of the field */
-			values[cols-1] = palloc(len + 1);
-			memset(values[cols-1], 0, len + 1);
-			strncpy(values[cols-1], buf2, len);
-
-			memset(buf2, 0, buf2len);
-			
-			off = i + 1;
-			len = 0;
-			cols++;
-
-			field_end = false;
-		}
-
-		if (strlen(buf2) == buf2len - 1)
-		{
-			buf2 = repalloc(buf2, buf2len * 2);
-			memset(buf2 + buf2len, 0, buf2len);
-			buf2len = buf2len * 2;
-		}
-	}
-	if (off > 0)
-	{
-		/* end of the field */
-		values[cols-1] = palloc(len + 1);
-		memset(values[cols-1], 0, len + 1);
-		strncpy(values[cols-1], buf2, len);
-
-		memset(buf2, 0, buf2len);
-						
-		cols++;
+		else
+			additions++;
 	}
 
-	pfree(buf2);
+	if (additions > pgss_max - hash_get_num_entries(pgss_hash))
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("rule import would exceed sql_firewall.max")));
 
-	return cols - 1;
+	hash_seq_init(&scan, rules);
+	while ((rule = hash_seq_search(&scan)) != NULL)
+	{
+		if (rule->query == NULL)
+			continue;
+		if (!qtext_store(rule->query, rule->query_len, &rule->query_offset, NULL))
+			ereport(ERROR,
+					(errcode_for_file_access(),
+					 errmsg("could not store SQL firewall rule text")));
+	}
+
+	hash_seq_init(&scan, rules);
+	while ((rule = hash_seq_search(&scan)) != NULL)
+	{
+		pgssEntry  *entry;
+
+		if (rule->query == NULL)
+			continue;
+		entry = entry_alloc(&rule->key, rule->query_offset, rule->query_len,
+							encoding);
+		Assert(entry != NULL);
+		entry->counters.calls = rule->calls;
+		pgss->rules_dirty = true;
+		pfree(rule->query);
+	}
+
+	if (additions > 0 && need_gc_qtexts())
+		gc_qtexts();
+	LWLockRelease(pgss->lock);
 }
 
 Datum
 sql_firewall_import_rule(PG_FUNCTION_ARGS)
 {
 	char	   *rule_file = text_to_cstring(PG_GETARG_TEXT_P(0));
-	FILE *filep;
-	bool		ret = true;
-	char *buf, *line;
-	size_t buflen;
+	FILE	   *filep;
+	HASHCTL		info;
+	HTAB	   *rules;
+	int			record;
+	char	   *fields[SQL_FIREWALL_CSV_COLS];
 
 	/* hash table must exist already */
 	if (!pgss || !pgss_hash)
@@ -2231,85 +2191,60 @@ sql_firewall_import_rule(PG_FUNCTION_ARGS)
 			(errmsg("could not open file \"%s\": %m",
 				rule_file)));
 
-	elog(DEBUG1, "sql_firewall_import_rule: file open, %s", rule_file);
+	memset(&info, 0, sizeof(info));
+	info.keysize = sizeof(pgssHashKey);
+	info.entrysize = sizeof(RuleImportEntry);
+	info.hash = pgss_hash_fn;
+	info.match = pgss_match_fn;
+	rules = hash_create("sql_firewall import", Min(100, pgss_max), &info,
+						HASH_ELEM | HASH_FUNCTION | HASH_COMPARE);
 
-	/*
-	 * 10 | 3294787656 | select * from k1 where uid = ?; |     2
-	ret = pgss_restore(10, 3294787656, "select * from k1 where uid = ?;", 7);
-	 */
-
-	buflen = 8;
-	buf = palloc(buflen);
-
-	line = NULL;
-	while (fgets(buf, buflen, filep) != NULL)
+	for (record = 1; read_rule_record(filep, fields, record); record++)
 	{
-		int len;
+		RuleImportEntry *rule;
+		pgssHashKey key;
+		int64		userid = parse_rule_number(fields[0]);
+		int64		queryid = parse_rule_number(fields[1]);
+		int64		calls = parse_rule_number(fields[3]);
+		bool		found;
 
-		/*
-		 * extend a line buffer while reading from the file.
-		 */
-		if (line == NULL)
-		{
-			line = pstrdup(buf);
-		}
+		key.userid = (Oid) userid;
+		key.queryid = (FirewallQueryId) queryid;
+		if (userid <= 0 || userid != (int64) key.userid || calls < 0 ||
+#if PG_VERSION_NUM < 180000
+			queryid != (int64) key.queryid ||
+#endif
+			fields[2][0] == '\0')
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("invalid value in SQL firewall CSV record %d", record)));
+
+		rule = hash_search(rules, &key, HASH_ENTER, &found);
+		if (found)
+			pfree(fields[2]);
 		else
 		{
-			len = strlen(line) + strlen(buf) + 1;
-			line = repalloc(line, len);
-			strncat(line, buf, len);
+			rule->query = fields[2];
+			rule->query_len = strlen(rule->query);
+			rule->calls = calls;
 		}
-		elog(DEBUG1, "line: %s", line);
-
-		len = strlen(line);
-		if (line[len-1] == '\r' || line[len-1] == '\n')
-		{
-			char *values[SQL_FIREWALL_CSV_COLS];
-
-			/*
-			 * if a complete csv record found, parse it, register to the rule,
-			 * and free a memory space.
-			 */
-			if (parse_csv_values(line, values) == SQL_FIREWALL_CSV_COLS)
-			{
-				int j;
-				elog(DEBUG1, "sql_firewall_import_rule: complete csv record. ready for parsing.");
-
-#if PG_VERSION_NUM >= 180000
-				ret = pgss_restore((Oid) pg_strtoint64(values[0]),
-								   (uint64) pg_strtoint64(values[1]),
-								   values[2], pg_strtoint64(values[3]));
-#else
-				ret = pgss_restore(atoi(values[0]), atoi(values[1]),
-								   values[2], atol(values[3]));
-#endif
-
-				for (j = 0 ; j < SQL_FIREWALL_CSV_COLS ; j++)
-				{
-					elog(DEBUG1, "sql_firewall_import_rule: values[%d] = %s", j, values[j]);
-					pfree(values[j]);
-				}
-
-				pfree(line);
-				line = NULL;
-			}
-		}
+		pfree(fields[0]);
+		pfree(fields[1]);
+		pfree(fields[3]);
 	}
 
-	if (line != NULL)
-		pfree(line);
-
+	if (ferror(filep))
+		ereport(ERROR,
+				(errcode_for_file_access(),
+				 errmsg("could not read file \"%s\": %m", rule_file)));
 	if (FreeFile(filep))
 		ereport(ERROR,
-			(errcode_for_file_access(),
-			 errmsg("could not close file \"%s\": %m",
-				rule_file)));
+				(errcode_for_file_access(),
+				 errmsg("could not close file \"%s\": %m", rule_file)));
 
-	elog(DEBUG1, "sql_firewall_import_rule: file close, %s", rule_file);
-
-	update_firewall_rule_file();
-
-	PG_RETURN_BOOL(ret);
+	apply_rule_import(rules);
+	hash_destroy(rules);
+	PG_RETURN_BOOL(update_firewall_rule_file());
 }
 
 #if PG_VERSION_NUM < 190000
