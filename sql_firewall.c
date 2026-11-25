@@ -188,6 +188,7 @@ typedef struct pgssSharedState
 	LWLockPadded lock_storage;
 #endif
 	Size		mean_query_len; /* current mean entry text length */
+	bool		rules_dirty;	/* protected by lock */
 	slock_t		mutex;			/* protects following fields only: */
 	Size		extent;			/* current extent of query file */
 	int			n_writers;		/* number of active writers to query file */
@@ -422,7 +423,7 @@ _PG_init(void)
 							 &pgfw_mode,
 							 PGFW_MODE_DISABLED,
 							 mode_options,
-							 PGC_POSTMASTER,
+							 PGC_SUSET,
 							 0,
 							 NULL,
 							 NULL,
@@ -574,6 +575,7 @@ pgss_shmem_startup(void)
 		pgss->lock = LWLockAssign();
 #endif
 		pgss->mean_query_len = ASSUMED_LENGTH_INIT;
+		pgss->rules_dirty = false;
 		SpinLockInit(&pgss->mutex);
 		pgss->extent = 0;
 		pgss->n_writers = 0;
@@ -756,12 +758,7 @@ fail:
 	 */
 }
 
-/*
- * shmem_shutdown hook: Dump statistics into file.
- *
- * Note: we don't bother with acquiring lock, because there should be no
- * other processes running when this is called.
- */
+/* Serialize the in-memory rule table for shutdown or an administrative command. */
 static void
 update_firewall_rule_file(void)
 {
@@ -772,6 +769,7 @@ update_firewall_rule_file(void)
 	int32		num_entries;
 	pgssEntry  *entry;
 
+	LWLockAcquire(pgss->lock, LW_EXCLUSIVE);
 	file = AllocateFile(PGSS_STATEMENTS_FILE ".tmp", PG_BINARY_W);
 	if (file == NULL)
 		goto error;
@@ -824,11 +822,13 @@ update_firewall_rule_file(void)
 	 * Rename file into place, so we atomically replace any old one.
 	 */
 	if (rename(PGSS_STATEMENTS_FILE ".tmp", PGSS_STATEMENTS_FILE) != 0)
-		ereport(LOG,
-				(errcode_for_file_access(),
-				 errmsg("could not rename sql_firewall file \"%s\": %m",
-						PGSS_STATEMENTS_FILE ".tmp")));
+	{
+		file = NULL;
+		goto error;
+	}
 
+	pgss->rules_dirty = false;
+	LWLockRelease(pgss->lock);
 	return;
 
 error:
@@ -840,6 +840,7 @@ error:
 		free(qbuffer);
 	if (file)
 		FreeFile(file);
+	LWLockRelease(pgss->lock);
 }
 
 static void
@@ -895,8 +896,8 @@ pgss_shmem_shutdown(int code, Datum arg)
 	if (!pgss || !pgss_hash)
 		return;
 
-	/* Update the firewall rule file*/
-	if (pgfw_mode == PGFW_MODE_LEARNING)
+	/* A login role can learn rules even when the server default is disabled. */
+	if (pgss->rules_dirty || pgfw_mode == PGFW_MODE_LEARNING)
 		update_firewall_rule_file();
 
 	update_firewall_counter_file();
@@ -1489,6 +1490,8 @@ pgss_store(const char *query, FirewallQueryId queryId,
 
 		/* OK to create a new hashtable entry */
 		entry = entry_alloc(&key, query_offset, query_len, encoding);
+		if (entry)
+			pgss->rules_dirty = true;
 
 		/* If needed, perform garbage collection while exclusive lock held */
 		if (do_gc)
@@ -2012,6 +2015,7 @@ pgss_restore(Oid userid, FirewallQueryId queryid, const char *query, int64 calls
 	SpinLockAcquire(&entry->mutex);
 	entry->counters.calls = calls;
 	SpinLockRelease(&entry->mutex);
+	pgss->rules_dirty = true;
 
 	if (need_gc_qtexts())
 		gc_qtexts();
@@ -2785,6 +2789,7 @@ done:
 	/* This counts as a query text garbage collection for our purposes */
 	record_gc_qtexts();
 
+	pgss->rules_dirty = true;
 	LWLockRelease(pgss->lock);
 }
 

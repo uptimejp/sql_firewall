@@ -115,6 +115,18 @@ only on the installed database.
   'disabled', 'learning', 'permissive' and 'enforcing'.
   The default value is 'disabled'.
 
+  A superuser can override the server default for a login role or for
+  an administrative session.
+
+  ```sql
+  ALTER ROLE app_user SET sql_firewall.firewall = 'enforcing';
+  ALTER ROLE app_user RESET sql_firewall.firewall;
+  ```
+
+  Role defaults apply to new connections. `SET ROLE` retains the
+  session's current mode. All sessions share the rule table, and the
+  rules learned by a login role are saved on a clean server shutdown.
+
 - `sql_firewall.max`
 
   Number of queries the SQL Firewall can learn.
