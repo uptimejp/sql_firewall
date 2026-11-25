@@ -13,21 +13,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
+  package:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v6
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/html
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v4
-        with:
-          path: docs/html
-      - uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v5.0.1
         id: deployment
