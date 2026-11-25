@@ -1,0 +1,55 @@
+<!doctype html>
+<!-- Generated from docs/md/packaging.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>パッケージによる導入 | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html" aria-current="page">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="パッケージによる導入">パッケージによる導入</h1>
+<p>フォークには PGDG パッケージ向けの RPM spec と、Gentoo オーバーレイ向けの ebuild が含まれています。</p>
+<h2 id="rpm">RPM</h2>
+<p>PGDG の PostgreSQL 開発パッケージ、C コンパイラ、GNU Make、<code>rpmbuild</code> を用意します。例えば PostgreSQL 19 向けなら <code>postgresql19-devel</code> を使います。spec の <code>pgmajor</code> に <code>9.4</code>、<code>18</code>、<code>19</code> を指定できます。9.4 にはアーカイブの開発パッケージが必要です。</p>
+<pre class="sh"><code>topdir=&quot;$(rpm --eval &#39;%{_topdir}&#39;)&quot;
+mkdir -p &quot;$topdir/SOURCES&quot;
+git archive --format=tar.gz --prefix=sql_firewall-0.8.1/ \
+    -o &quot;$topdir/SOURCES/sql_firewall-0.8.1.tar.gz&quot; HEAD
+rpmbuild -ba --define &#39;pgmajor 19&#39; packaging/rpm/sql_firewall.spec</code></pre>
+<p>生成先は <code>$topdir/RPMS</code> です。生成したバイナリ RPM を <code>rpm -qpl</code> で調べると、拡張の共有ライブラリ、SQL スクリプト、control ファイルを確認できます。インストールする RPM を選んで実行します。</p>
+<pre class="sh"><code>sudo dnf install /path/to/generated-postgresql19-sqlfirewall.rpm</code></pre>
+<p>独自の場所に PostgreSQL を入れた場合は <code>--define 'pg_config /path/to/bin/pg_config'</code> で選べます。ビルドは <code>pgmajor</code> と <code>pg_config</code> のメジャーバージョンが一致することを確認します。<a href="https://github.com/soudai/sql_firewall/tree/main/packaging/rpm">RPM spec とビルド手順</a></p>
+<h2 id="gentoo">Gentoo</h2>
+<p><a href="https://github.com/soudai/sql_firewall/tree/main/packaging/gentoo/dev-db/sql-firewall">ebuild のディレクトリ</a>をローカルオーバーレイの `dev-db/sql-firewall` にコピーします。この ebuild はフォークの <code>main</code> をビルドします。</p>
+<p>例えば PostgreSQL 18 向けにビルドするなら、Portage の <code>package.use</code> に次の項目を指定します。</p>
+<pre class="text"><code>dev-db/sql-firewall postgres_targets_postgres18</code></pre>
+<pre class="sh"><code>ebuild /path/to/overlay/dev-db/sql-firewall/sql-firewall-9999.ebuild manifest
+emerge --ask dev-db/sql-firewall</code></pre>
+<p>利用できる PostgreSQL スロットは、使用中の Gentoo リポジトリと <code>postgres-multi</code> eclass によって決まります。<a href="https://github.com/soudai/sql_firewall/tree/main/packaging/gentoo">Gentoo オーバーレイの手順</a></p>
+<p>パッケージをインストールした後は、<a href="installation.html">プリロードと拡張の作成</a>を行います。</p>
+    </main>
+  </div>
+</body>
+</html>

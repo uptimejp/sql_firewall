@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- Generated from docs/md/installation.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>インストール | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html" aria-current="page">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="インストール">インストール</h1>
+<p>拡張を動かす PostgreSQL と同じメジャーバージョンの <code>pg_config</code> とサーバーヘッダーを使います。対応バージョンは <strong>9.4.x・18.x・19.x</strong> です。RPM と Gentoo の手順は<a href="packaging.html">パッケージによる導入</a>を参照してください。</p>
+<h2 id="1-ビルドとインストール">1. ビルドとインストール</h2>
+<p>Linux または WSL で Git、C コンパイラ、GNU Make を使います。PostgreSQL をパッケージで導入している場合は、対象バージョンの開発パッケージも用意してください。</p>
+<pre class="sh"><code>git clone --branch main https://github.com/soudai/sql_firewall.git
+cd sql_firewall
+
+export PG_CONFIG=&quot;$(command -v pg_config)&quot;
+&quot;$PG_CONFIG&quot; --version
+&quot;$PG_CONFIG&quot; --pgxs
+make USE_PGXS=1 PG_CONFIG=&quot;$PG_CONFIG&quot;
+sudo make USE_PGXS=1 PG_CONFIG=&quot;$PG_CONFIG&quot; install</code></pre>
+<p>複数バージョンがある場合は <code>PG_CONFIG</code> に対象の絶対パスを指定します。インストール先に現在のユーザーが書き込める構成では <code>sudo</code> を省略できます。<a href="https://www.postgresql.org/docs/19/extend-pgxs.html">PostgreSQL の PGXS ドキュメント</a></p>
+<h2 id="2-サーバーでプリロードする">2. サーバーでプリロードする</h2>
+<p>対象クラスタの <code>postgresql.conf</code> を編集します。<code>shared_preload_libraries</code> に既存のライブラリがある場合は、同じリストに <code>sql_firewall</code> を追加します。最初は <code>disabled</code> で起動すると、アプリ用ロールの学習を始める前に接続設定を準備できます。</p>
+<pre class="conf"><code>shared_preload_libraries = &#39;sql_firewall&#39;
+sql_firewall.firewall = &#39;disabled&#39;</code></pre>
+<p>18・19 では <code>compute_query_id</code> に既定の <code>auto</code> または <code>on</code> を使います。<code>pg_stat_statements</code> と併用する場合、18・19 では両方のロード順で動作確認済みです。9.4 での併用は <code>pg_stat_statements,sql_firewall</code> の順に指定します。</p>
+<p>設定を反映するにはクラスタを再起動します。サービス管理下のクラスタは、そのサービスの再起動手順を使ってください。手動で起動したクラスタでは <code>pg_ctl</code> を使用できます。</p>
+<pre class="sh"><code>&quot;$(&quot;$PG_CONFIG&quot; --bindir)/pg_ctl&quot; -D &quot;$PGDATA&quot; -w restart</code></pre>
+<h2 id="3-拡張を作成して確認する">3. 拡張を作成して確認する</h2>
+<p>関数とビューを使うデータベースにスーパーユーザーで接続します。</p>
+<pre class="sql"><code>CREATE EXTENSION sql_firewall;
+SHOW shared_preload_libraries;
+SHOW sql_firewall.firewall;
+SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat;</code></pre>
+<p>プリロードに <code>sql_firewall</code> が含まれ、モードが <code>disabled</code> と表示されれば準備完了です。ルールと検査はクラスタ全体に適用され、管理関数とビューは拡張を作ったデータベースで使えます。</p>
+<p><a href="quickstart.html">クイックスタート</a>では専用の一時クラスタで、学習と警告・拒否を試します。</p>
+    </main>
+  </div>
+</body>
+</html>
