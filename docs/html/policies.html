@@ -1,0 +1,107 @@
+<!doctype html>
+<!-- Generated from docs/md/policies.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ポリシーと動作モード | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html" aria-current="page">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="ポリシーと動作モード">ポリシーと動作モード</h1>
+<p>ポリシーは、ルール表の一致を許可と拒否のどちらとして扱うかを決めます。モードは違反時の挙動を決めます。</p>
+<table>
+<thead>
+<tr class="header">
+<th><code>sql_firewall.policy</code></th>
+<th>一致した SQL</th>
+<th>一致しない SQL</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>allowlist</code>（既定）</td>
+<td>許可</td>
+<td>ポリシー違反</td>
+</tr>
+<tr class="even">
+<td><code>denylist</code></td>
+<td>ポリシー違反</td>
+<td>許可</td>
+</tr>
+</tbody>
+</table>
+<p>ポリシーはクラスタ単位で、切り替えには再起動が必要です。両方のポリシーのルールは別々に保存されます。</p>
+<table>
+<thead>
+<tr class="header">
+<th><code>sql_firewall.firewall</code></th>
+<th>動作</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td><code>disabled</code></td>
+<td>検査と新規ルールの学習を停止します。</td>
+</tr>
+<tr class="even">
+<td><code>learning</code></td>
+<td>実行した SQL を現在のポリシーのルールとして記録します。</td>
+</tr>
+<tr class="odd">
+<td><code>permissive</code></td>
+<td>ポリシー違反の SQL に警告し、実行を続けます。</td>
+</tr>
+<tr class="even">
+<td><code>enforcing</code></td>
+<td>ポリシー違反の SQL をエラーで拒否します。</td>
+</tr>
+</tbody>
+</table>
+<p>18・19 は通常の SQL に本体の64ビットクエリIDを使います。定数の違いが同じIDにまとまる場合があるため、行や特定の値に対する制限には PostgreSQL の権限や行レベルセキュリティを使います。DDL などのユーティリティ文は SQL テキストをハッシュ化します。書式を変えると別ルールになる場合があります。ルールはトップレベルの SQL を基準に設計します。</p>
+<h2 id="拒否リストを試す">拒否リストを試す</h2>
+<p><a href="quickstart.html">クイックスタート</a>の手順5まで実行した一時クラスタで、集計 SQL を拒否リストに登録します。<code>admin</code> と <code>app</code> はそこで定義した関数です。</p>
+<h3 id="1-拒否リストで対象の-sql-を学習する">1. 拒否リストで対象の SQL を学習する</h3>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w restart \
+    -o &#39;-c sql_firewall.policy=denylist&#39;
+admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p><code>2</code> が返り、<code>app_user</code> の拒否リストに登録されます。学習中に実行するのは、あとで拒否したい文だけです。</p>
+<h3 id="2-警告と拒否を確認する">2. 警告と拒否を確認する</h3>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>警告が表示され、結果 <code>2</code> が返ります。次に <code>enforcing</code> に切り替えます。</p>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;&quot;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>1件検索は <code>pending</code> を返し、集計は <code>ERROR:  Prohibited SQL statement</code> で終了します。</p>
+<h3 id="3-許可リストに戻す">3. 許可リストに戻す</h3>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w restart \
+    -o &#39;-c sql_firewall.policy=allowlist&#39;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;</code></pre>
+<p>許可リストのルールが再び読み込まれ、結果は <code>pending</code> です。</p>
+    </main>
+  </div>
+</body>
+</html>

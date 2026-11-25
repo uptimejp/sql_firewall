@@ -1,0 +1,78 @@
+<!doctype html>
+<!-- Generated from docs/md/index.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>sql_firewall ガイド | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html" aria-current="page">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="sql_firewall-ガイド">sql_firewall ガイド</h1>
+<p>sql_firewall は、PostgreSQL が受け取る SQL に対して、ロールごとのルールに基づいて警告や拒否を行う拡張です。アプリが普段発行する文を学習して許可する使い方と、既知の文を登録して拒否する使い方があります。</p>
+<p><strong>対応バージョン</strong> PostgreSQL 9.4.x・18.x・19.x</p>
+<table>
+<thead>
+<tr class="header">
+<th>やりたいこと</th>
+<th>ガイド</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td>拡張をビルドして PostgreSQL に導入する</td>
+<td><a href="installation.html">インストール</a></td>
+</tr>
+<tr class="even">
+<td>一時クラスタで学習・警告・拒否を試す</td>
+<td><a href="quickstart.html">クイックスタート</a></td>
+</tr>
+<tr class="odd">
+<td>許可リストと拒否リストを使い分ける</td>
+<td><a href="policies.html">ポリシーと動作モード</a></td>
+</tr>
+<tr class="even">
+<td>アプリと運用担当でモードを分ける</td>
+<td><a href="roles.html">ログインロール別のモード</a></td>
+</tr>
+<tr class="odd">
+<td>ステージングのルールを本番へ追加する</td>
+<td><a href="rules.html">ルールの CSV 移行</a></td>
+</tr>
+<tr class="even">
+<td>ルール、カウンター、設定値を確認する</td>
+<td><a href="reference.html">リファレンスとトラブルシューティング</a></td>
+</tr>
+<tr class="odd">
+<td>RPM または Gentoo ebuild で導入する</td>
+<td><a href="packaging.html">パッケージによる導入</a></td>
+</tr>
+</tbody>
+</table>
+<p>ルールのキーはロール OID（<code>userid</code>）とクエリID（<code>queryid</code>）です。例えば、定数だけが異なる2つの <code>SELECT</code> は、同じクエリIDになる場合があります。PostgreSQL の <code>GRANT</code> や行レベルセキュリティも通常どおり適用されます。</p>
+<p><a href="https://github.com/soudai/sql_firewall/tree/main">リポジトリ</a> · <a href="https://github.com/uptimejp/sql_firewall/issues">上流の Issue 一覧</a></p>
+    </main>
+  </div>
+</body>
+</html>

@@ -8,6 +8,9 @@ database from SQL injections or unexpected queries.
 sql_firewall learns statement rules and can warn about or reject SQL
 according to the selected rule policy.
 
+Japanese documentation is available on [GitHub Pages](https://soudai.github.io/sql_firewall/)
+and [as Markdown](docs/md/index.md).
+
 ## How it works
 
 Rules are keyed by `userid` and `queryid`. The default `allowlist`

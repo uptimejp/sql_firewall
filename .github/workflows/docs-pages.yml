@@ -1,0 +1,33 @@
+name: Publish documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/html/**'
+      - '.github/workflows/docs-pages.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/html
+      - uses: actions/deploy-pages@v4
+        id: deployment
