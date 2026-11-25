@@ -102,7 +102,6 @@
 #include "utils/rel.h"
 #include "utils/relcache.h"
 
-
 #if PG_VERSION_NUM >= 180000
 typedef uint64 FirewallQueryId;
 typedef JumbleState pgssJumbleState;
@@ -142,15 +141,7 @@ static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 10000;
 static const uint32 PGSS_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
 #endif
 
-/* XXX: Should USAGE_EXEC reflect execution time and/or buffer usage? */
-#define USAGE_EXEC(duration)	(1.0)
-#define USAGE_INIT				(1.0)	/* including initial planning */
-#define ASSUMED_MEDIAN_INIT		(10.0)	/* initial assumed median usage */
 #define ASSUMED_LENGTH_INIT		1024	/* initial assumed mean query length */
-#define USAGE_DECREASE_FACTOR	(0.99)	/* decreased every entry_dealloc */
-#define STICKY_DECREASE_FACTOR	(0.50)	/* factor for sticky entries */
-#define USAGE_DEALLOC_PERCENT	5		/* free this % of entries at once */
-
 #define JUMBLE_SIZE				1024	/* query serialization buffer size */
 
 /*
@@ -196,7 +187,6 @@ typedef struct pgssSharedState
 #if PG_VERSION_NUM >= 190000
 	LWLockPadded lock_storage;
 #endif
-	double		cur_median_usage;		/* current median usage in hashtable */
 	Size		mean_query_len; /* current mean entry text length */
 	slock_t		mutex;			/* protects following fields only: */
 	Size		extent;			/* current extent of query file */
@@ -268,23 +258,6 @@ static HTAB *pgss_hash = NULL;
 
 typedef enum
 {
-	PGSS_TRACK_NONE,			/* track no statements */
-	PGSS_TRACK_TOP,				/* only top level statements */
-	PGSS_TRACK_ALL				/* all statements, including nested ones */
-}	PGSSTrackLevel;
-
-#ifdef NOT_USED
-static const struct config_enum_entry track_options[] =
-{
-	{"none", PGSS_TRACK_NONE, false},
-	{"top", PGSS_TRACK_TOP, false},
-	{"all", PGSS_TRACK_ALL, false},
-	{NULL, 0, false}
-};
-#endif
-
-typedef enum
-{
 	PGFW_MODE_DISABLED,
 	PGFW_MODE_LEARNING,
 	PGFW_MODE_PERMISSIVE,
@@ -303,13 +276,7 @@ static const struct config_enum_entry mode_options[] =
 static int	pgfw_mode;			/* firewall mode */
 
 static int	pgss_max;			/* max # statements to track */
-static int	pgss_track;			/* tracking level */
-static bool pgss_save;			/* whether to save stats across shutdown */
-
-
-#define pgss_enabled() \
-	(pgss_track == PGSS_TRACK_ALL || \
-	(pgss_track == PGSS_TRACK_TOP && nested_level == 0))
+#define pgss_enabled() (nested_level == 0)
 
 #define record_gc_qtexts() \
 	do { \
@@ -386,8 +353,6 @@ static uint32 pgss_hash_fn(const void *key, Size keysize);
 static int	pgss_match_fn(const void *key1, const void *key2, Size keysize);
 static FirewallQueryId pgss_hash_string(const char *str);
 static void pgss_store(const char *query, FirewallQueryId queryId,
-		   double total_time, uint64 rows,
-		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate);
 static void pg_stat_statements_internal(FunctionCallInfo fcinfo,
 							bool showtext);
@@ -395,10 +360,7 @@ static void pg_stat_statements_internal(FunctionCallInfo fcinfo,
 static Size pgss_memsize(void);
 #endif
 static pgssEntry *entry_alloc(pgssHashKey *key, Size query_offset, int query_len,
-			int encoding, bool sticky);
-#ifdef NOT_USED
-static void entry_dealloc(void);
-#endif
+			int encoding);
 static bool qtext_store(const char *query, int query_len,
 			Size *query_offset, int *gc_count);
 static bool pgss_restore(Oid userid, FirewallQueryId queryid, const char *query,
@@ -420,7 +382,6 @@ static char *generate_normalized_query(pgssJumbleState *jstate, const char *quer
 						  int *query_len_p, int encoding);
 static void fill_in_constant_lengths(pgssJumbleState *jstate, const char *query);
 static int	comp_location(const void *a, const void *b);
-
 
 /*
  * Module load callback
@@ -454,9 +415,6 @@ _PG_init(void)
 							NULL,
 							NULL,
 							NULL);
-
-	pgss_track = PGSS_TRACK_TOP;
-	pgss_save = true;
 
 	DefineCustomEnumVariable("sql_firewall.firewall",
 			   "Enable SQL Firewall feature.",
@@ -615,7 +573,6 @@ pgss_shmem_startup(void)
 #else
 		pgss->lock = LWLockAssign();
 #endif
-		pgss->cur_median_usage = ASSUMED_MEDIAN_INIT;
 		pgss->mean_query_len = ASSUMED_LENGTH_INIT;
 		SpinLockInit(&pgss->mutex);
 		pgss->extent = 0;
@@ -664,17 +621,6 @@ pgss_shmem_startup(void)
 	qfile = AllocateFile(PGSS_STATEMENTS_TEMP_FILE, PG_BINARY_W);
 	if (qfile == NULL)
 		goto write_error;
-
-	/*
-	 * If we were told not to load old statistics, we're done.  (Note we do
-	 * not try to unlink any old dump file in this case.  This seems a bit
-	 * questionable but it's the historical behavior.)
-	 */
-	if (!pgss_save)
-	{
-		FreeFile(qfile);
-		return;
-	}
 
 	/*
 	 * Attempt to load old statistics from the dump file.
@@ -739,8 +685,7 @@ pgss_shmem_startup(void)
 
 		/* make the hashtable entry (discards old entries if too many) */
 		entry = entry_alloc(&temp.key, query_offset, temp.query_len,
-							temp.encoding,
-							false);
+							temp.encoding);
 
 		if (entry == NULL)
 			break;
@@ -752,23 +697,6 @@ pgss_shmem_startup(void)
 	pfree(buffer);
 	FreeFile(file);
 	FreeFile(qfile);
-
-	/*
-	 * Remove the persisted stats file so it's not included in
-	 * backups/replication slaves, etc.  A new file will be written on next
-	 * shutdown.
-	 *
-	 * Note: it's okay if the PGSS_STATEMENTS_TEMP_FILE is included in a basebackup,
-	 * because we remove that file on startup; it acts inversely to
-	 * PGSS_STATEMENTS_FILE, in that it is only supposed to be around when the
-	 * server is running, whereas PGSS_STATEMENTS_FILE is only supposed to be around
-	 * when the server is not running.  Leaving the file creates no danger of
-	 * a newly restored database having a spurious record of execution costs,
-	 * which is what we're really concerned about here.
-	 */
-#ifdef NOT_USED
-	unlink(PGSS_STATEMENTS_FILE);
-#endif
 
 	file = AllocateFile(PGSS_COUNTER_FILE, PG_BINARY_R);
 	if (file == NULL)
@@ -822,11 +750,6 @@ fail:
 		FreeFile(file);
 	if (qfile)
 		FreeFile(qfile);
-	/* If possible, throw away the bogus file; ignore any error */
-#ifdef NOT_USED
-	unlink(PGSS_STATEMENTS_FILE);
-#endif
-
 	/*
 	 * Don't unlink PGSS_STATEMENTS_TEMP_FILE here; it should always be around while the
 	 * server is running with pg_stat_statements enabled
@@ -972,10 +895,6 @@ pgss_shmem_shutdown(int code, Datum arg)
 	if (!pgss || !pgss_hash)
 		return;
 
-	/* Don't dump if told not to. */
-	if (!pgss_save)
-		return;
-
 	/* Update the firewall rule file*/
 	if (pgfw_mode == PGFW_MODE_LEARNING)
 		update_firewall_rule_file();
@@ -1056,12 +975,7 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query)
 	 * there's no need for an early entry.
 	 */
 	if (jstate.clocations_count > 0)
-		pgss_store(pstate->p_sourcetext,
-				   query->queryId,
-				   0,
-				   0,
-				   NULL,
-				   &jstate);
+		pgss_store(pstate->p_sourcetext, query->queryId, &jstate);
 }
 #else
 /*
@@ -1200,12 +1114,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		 */
 		InstrEndLoop(queryDesc->totaltime);
 
-		pgss_store(queryDesc->sourceText,
-				   queryId,
-				   queryDesc->totaltime->total * 1000.0,		/* convert to msec */
-				   queryDesc->estate->es_processed,
-				   &queryDesc->totaltime->bufusage,
-				   NULL);
+		pgss_store(queryDesc->sourceText, queryId, NULL);
 	}
 #else
 	if (queryId != 0 && pgss_enabled() && !IsParallelWorker())
@@ -1251,16 +1160,6 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		!IsA(parsetree, PrepareStmt) &&
 		!IsA(parsetree, DeallocateStmt))
 	{
-		instr_time	start;
-		instr_time	duration;
-		uint64		rows;
-		BufferUsage bufusage_start,
-					bufusage;
-		uint32		queryId;
-
-		bufusage_start = pgBufferUsage;
-		INSTR_TIME_SET_CURRENT(start);
-
 		nested_level++;
 		PG_TRY();
 		{
@@ -1281,57 +1180,7 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		}
 		PG_END_TRY();
 
-		INSTR_TIME_SET_CURRENT(duration);
-		INSTR_TIME_SUBTRACT(duration, start);
-
-		/* parse command tag to retrieve the number of affected rows. */
-		if (completionTag &&
-			strncmp(completionTag, "COPY ", 5) == 0)
-		{
-#ifdef HAVE_STRTOULL
-			rows = strtoull(completionTag + 5, NULL, 10);
-#else
-			rows = strtoul(completionTag + 5, NULL, 10);
-#endif
-		}
-		else
-			rows = 0;
-
-		/* calc differences of buffer counters. */
-		bufusage.shared_blks_hit =
-			pgBufferUsage.shared_blks_hit - bufusage_start.shared_blks_hit;
-		bufusage.shared_blks_read =
-			pgBufferUsage.shared_blks_read - bufusage_start.shared_blks_read;
-		bufusage.shared_blks_dirtied =
-			pgBufferUsage.shared_blks_dirtied - bufusage_start.shared_blks_dirtied;
-		bufusage.shared_blks_written =
-			pgBufferUsage.shared_blks_written - bufusage_start.shared_blks_written;
-		bufusage.local_blks_hit =
-			pgBufferUsage.local_blks_hit - bufusage_start.local_blks_hit;
-		bufusage.local_blks_read =
-			pgBufferUsage.local_blks_read - bufusage_start.local_blks_read;
-		bufusage.local_blks_dirtied =
-			pgBufferUsage.local_blks_dirtied - bufusage_start.local_blks_dirtied;
-		bufusage.local_blks_written =
-			pgBufferUsage.local_blks_written - bufusage_start.local_blks_written;
-		bufusage.temp_blks_read =
-			pgBufferUsage.temp_blks_read - bufusage_start.temp_blks_read;
-		bufusage.temp_blks_written =
-			pgBufferUsage.temp_blks_written - bufusage_start.temp_blks_written;
-		bufusage.blk_read_time = pgBufferUsage.blk_read_time;
-		INSTR_TIME_SUBTRACT(bufusage.blk_read_time, bufusage_start.blk_read_time);
-		bufusage.blk_write_time = pgBufferUsage.blk_write_time;
-		INSTR_TIME_SUBTRACT(bufusage.blk_write_time, bufusage_start.blk_write_time);
-
-		/* For utility statements, we just hash the query string directly */
-		queryId = pgss_hash_string(queryString);
-
-		pgss_store(queryString,
-				   queryId,
-				   INSTR_TIME_GET_MILLISEC(duration),
-				   rows,
-				   &bufusage,
-				   NULL);
+		pgss_store(queryString, pgss_hash_string(queryString), NULL);
 	}
 	else
 	{
@@ -1394,7 +1243,7 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 
 	if (track)
 	{
-		pgss_store(query, queryId, 0, 0, NULL, NULL);
+		pgss_store(query, queryId, NULL);
 		pfree(query);
 	}
 }
@@ -1452,11 +1301,11 @@ pgss_store_statement(const char *query, int location, int len,
 			   local.clocations_count * sizeof(LocationLen));
 		for (i = 0; i < local.clocations_count; i++)
 			local.clocations[i].location -= location;
-		pgss_store(text, queryId, 0, 0, NULL, &local);
+		pgss_store(text, queryId, &local);
 		pfree(local.clocations);
 	}
 	else
-		pgss_store(text, queryId, 0, 0, NULL, NULL);
+		pgss_store(text, queryId, NULL);
 	pfree(text);
 }
 #endif
@@ -1533,12 +1382,10 @@ stat_error_increment(void)
  *
  * If jstate is not NULL then we're trying to create an entry for which
  * we have no statistics as yet; we just want to record the normalized
- * query string.  total_time, rows, bufusage are ignored in this case.
+ * query string.
  */
 static void
 pgss_store(const char *query, FirewallQueryId queryId,
-		   double total_time, uint64 rows,
-		   const BufferUsage *bufusage,
 		   pgssJumbleState *jstate)
 {
 	pgssHashKey key;
@@ -1641,8 +1488,7 @@ pgss_store(const char *query, FirewallQueryId queryId,
 			goto done;
 
 		/* OK to create a new hashtable entry */
-		entry = entry_alloc(&key, query_offset, query_len, encoding,
-							jstate != NULL);
+		entry = entry_alloc(&key, query_offset, query_len, encoding);
 
 		/* If needed, perform garbage collection while exclusive lock held */
 		if (do_gc)
@@ -2093,11 +1939,9 @@ sql_firewall_export_rule(PG_FUNCTION_ARGS)
 
 		fprintf(filep, "," INT64_FORMAT "\n", tmp.calls);
 
-		//#ifdef NOT_USED
 		elog(DEBUG1, "user=%u, queryid=" INT64_FORMAT ", query=%s, len=%zd, query_len=%d, calls=" INT64_FORMAT,
 			 entry->key.userid, (int64) entry->key.queryid, qstr,
 			 strlen(qstr), entry->query_len, tmp.calls);
-		//#endif
 	}
 
 	if (FreeFile(filep))
@@ -2158,7 +2002,7 @@ pgss_restore(Oid userid, FirewallQueryId queryid, const char *query, int64 calls
 		goto done;
 	}
 
-	entry = entry_alloc(&key, query_offset, query_len, encoding, false);
+	entry = entry_alloc(&key, query_offset, query_len, encoding);
 	if (!entry)
 	{
 		elog(ERROR, "Could not allocate an entry in the hash table.");
@@ -2458,20 +2302,13 @@ pgss_memsize(void)
  *
  * "query" need not be null-terminated; we rely on query_len instead
  *
- * If "sticky" is true, make the new entry artificially sticky so that it will
- * probably still be there when the query finishes execution.  We do this by
- * giving it a median usage value rather than the normal value.  (Strictly
- * speaking, query strings are normalized on a best effort basis, though it
- * would be difficult to demonstrate this even under artificial conditions.)
- *
  * Note: despite needing exclusive lock, it's not an error for the target
  * entry to already exist.  This is because pgss_store releases and
  * reacquires lock after failing to find a match; so someone else could
  * have made the entry while we waited to get exclusive lock.
  */
 static pgssEntry *
-entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding,
-			bool sticky)
+entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding)
 {
 	pgssEntry  *entry;
 	bool		found;
@@ -2503,84 +2340,6 @@ entry_alloc(pgssHashKey *key, Size query_offset, int query_len, int encoding,
 
 	return entry;
 }
-
-#ifdef NOT_USED
-/*
- * qsort comparator for sorting into increasing usage order
- */
-static int
-entry_cmp(const void *lhs, const void *rhs)
-{
-	double		l_usage = (*(pgssEntry *const *) lhs)->counters.usage;
-	double		r_usage = (*(pgssEntry *const *) rhs)->counters.usage;
-
-	if (l_usage < r_usage)
-		return -1;
-	else if (l_usage > r_usage)
-		return +1;
-	else
-		return 0;
-}
-#endif /* NOT_USED */
-
-#ifdef NOT_USED
-/*
- * Deallocate least used entries.
- * Caller must hold an exclusive lock on pgss->lock.
- */
-static void
-entry_dealloc(void)
-{
-	HASH_SEQ_STATUS hash_seq;
-	pgssEntry **entries;
-	pgssEntry  *entry;
-	int			nvictims;
-	int			i;
-	Size		totlen = 0;
-
-	/*
-	 * Sort entries by usage and deallocate USAGE_DEALLOC_PERCENT of them.
-	 * While we're scanning the table, apply the decay factor to the usage
-	 * values.
-	 */
-
-	entries = palloc(hash_get_num_entries(pgss_hash) * sizeof(pgssEntry *));
-
-	i = 0;
-	hash_seq_init(&hash_seq, pgss_hash);
-	while ((entry = hash_seq_search(&hash_seq)) != NULL)
-	{
-		entries[i++] = entry;
-		/* "Sticky" entries get a different usage decay rate. */
-		if (entry->counters.calls == 0)
-			entry->counters.usage *= STICKY_DECREASE_FACTOR;
-		else
-			entry->counters.usage *= USAGE_DECREASE_FACTOR;
-		/* Accumulate total size, too. */
-		totlen += entry->query_len + 1;
-	}
-
-	qsort(entries, i, sizeof(pgssEntry *), entry_cmp);
-
-	if (i > 0)
-	{
-		/* Record the (approximate) median usage */
-		pgss->cur_median_usage = entries[i / 2]->counters.usage;
-		/* Record the mean query length */
-		pgss->mean_query_len = totlen / i;
-	}
-
-	nvictims = Max(10, i * USAGE_DEALLOC_PERCENT / 100);
-	nvictims = Min(nvictims, i);
-
-	for (i = 0; i < nvictims; i++)
-	{
-		hash_search(pgss_hash, &entries[i]->key, HASH_REMOVE, NULL);
-	}
-
-	pfree(entries);
-}
-#endif /* NOT_USED */
 
 /*
  * Given a null-terminated string, allocate a new entry in the external query
