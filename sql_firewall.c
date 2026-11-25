@@ -118,7 +118,8 @@ typedef uint32 FirewallQueryId;
 PG_MODULE_MAGIC;
 
 /* Location of permanent stats file (valid when database is shut down) */
-#define PGSS_STATEMENTS_FILE	PGSTAT_STAT_PERMANENT_DIRECTORY "/sql_firewall_statements.stat"
+#define PGSS_ALLOWLIST_FILE PGSTAT_STAT_PERMANENT_DIRECTORY "/sql_firewall_statements.stat"
+#define PGSS_DENYLIST_FILE PGSTAT_STAT_PERMANENT_DIRECTORY "/sql_firewall_denylist.stat"
 #define PGSS_COUNTER_FILE	PGSTAT_STAT_PERMANENT_DIRECTORY "/sql_firewall.stat"
 
 /*
@@ -274,10 +275,42 @@ static const struct config_enum_entry mode_options[] =
 	{NULL, 0, false}
 };
 
+typedef enum
+{
+	PGFW_POLICY_ALLOWLIST,
+	PGFW_POLICY_DENYLIST
+} PGFWPolicy;
+
+static const struct config_enum_entry policy_options[] =
+{
+	{"allowlist", PGFW_POLICY_ALLOWLIST, false},
+	{"denylist", PGFW_POLICY_DENYLIST, false},
+	{NULL, 0, false}
+};
+
+static const struct
+{
+	const char *path;
+	const char *temp_path;
+} rule_files[] =
+{
+	[PGFW_POLICY_ALLOWLIST] = {PGSS_ALLOWLIST_FILE, PGSS_ALLOWLIST_FILE ".tmp"},
+	[PGFW_POLICY_DENYLIST] = {PGSS_DENYLIST_FILE, PGSS_DENYLIST_FILE ".tmp"}
+};
+
 static int	pgfw_mode;			/* firewall mode */
+static int	pgfw_policy;		/* firewall rule matching policy */
 
 static int	pgss_max;			/* max # statements to track */
+
+#define PGSS_STATEMENTS_FILE (rule_files[pgfw_policy].path)
+#define PGSS_STATEMENTS_DUMP_TMP (rule_files[pgfw_policy].temp_path)
+
+#if PG_VERSION_NUM >= 180000
+#define pgss_enabled() (nested_level == 0 && !IsParallelWorker())
+#else
 #define pgss_enabled() (nested_level == 0)
+#endif
 
 #define record_gc_qtexts() \
 	do { \
@@ -344,12 +377,12 @@ static void pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 								bool readOnlyTree, ProcessUtilityContext context,
 								ParamListInfo params, QueryEnvironment *queryEnv,
 								DestReceiver *dest, QueryCompletion *qc);
-static void stat_warning_increment(void);
-static void stat_error_increment(void);
-static void pgss_check(FirewallQueryId queryId);
 static void pgss_store_statement(const char *query, int location, int len,
 								 FirewallQueryId queryId, const JumbleState *jstate);
 #endif
+static void stat_warning_increment(void);
+static void stat_error_increment(void);
+static void pgss_check(FirewallQueryId queryId);
 static uint32 pgss_hash_fn(const void *key, Size keysize);
 static int	pgss_match_fn(const void *key1, const void *key2, Size keysize);
 static FirewallQueryId pgss_hash_string(const char *str);
@@ -424,6 +457,18 @@ _PG_init(void)
 							 PGFW_MODE_DISABLED,
 							 mode_options,
 							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
+	DefineCustomEnumVariable("sql_firewall.policy",
+							 "Select allowlist or denylist rule matching.",
+							 NULL,
+							 &pgfw_policy,
+							 PGFW_POLICY_ALLOWLIST,
+							 policy_options,
+							 PGC_POSTMASTER,
 							 0,
 							 NULL,
 							 NULL,
@@ -770,7 +815,7 @@ update_firewall_rule_file(void)
 	pgssEntry  *entry;
 
 	LWLockAcquire(pgss->lock, LW_EXCLUSIVE);
-	file = AllocateFile(PGSS_STATEMENTS_FILE ".tmp", PG_BINARY_W);
+	file = AllocateFile(PGSS_STATEMENTS_DUMP_TMP, PG_BINARY_W);
 	if (file == NULL)
 		goto error;
 
@@ -821,7 +866,7 @@ update_firewall_rule_file(void)
 	/*
 	 * Rename file into place, so we atomically replace any old one.
 	 */
-	if (rename(PGSS_STATEMENTS_FILE ".tmp", PGSS_STATEMENTS_FILE) != 0)
+	if (rename(PGSS_STATEMENTS_DUMP_TMP, PGSS_STATEMENTS_FILE) != 0)
 	{
 		file = NULL;
 		goto error;
@@ -835,7 +880,7 @@ error:
 	ereport(LOG,
 			(errcode_for_file_access(),
 			 errmsg("could not write sql_firewall file \"%s\": %m",
-					PGSS_STATEMENTS_FILE ".tmp")));
+					PGSS_STATEMENTS_DUMP_TMP)));
 	if (qbuffer)
 		free(qbuffer);
 	if (file)
@@ -879,7 +924,7 @@ update_firewall_counter_file(void)
 		ereport(LOG,
 				(errcode_for_file_access(),
 				 errmsg("could not rename sql_firewall file \"%s\": %m",
-						PGSS_STATEMENTS_FILE ".tmp")));
+						PGSS_COUNTER_FILE ".tmp")));
 
 error:
 	return;
@@ -904,7 +949,7 @@ pgss_shmem_shutdown(int code, Datum arg)
 
 	/* Unlink query-texts file; it's not needed while shutdown */
 	unlink(PGSS_STATEMENTS_TEMP_FILE);
-	unlink(PGSS_STATEMENTS_FILE ".tmp");
+	unlink(PGSS_STATEMENTS_DUMP_TMP);
 	unlink(PGSS_COUNTER_FILE ".tmp");
 
 	elog(LOG, "sql_firewall file \"%s\" has been updated.", PGSS_STATEMENTS_FILE);
@@ -1011,11 +1056,8 @@ pgss_post_parse_analyze(ParseState *pstate, Query *query, ParseJumbleState *jsta
 static void
 pgss_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
-#if PG_VERSION_NUM >= 180000
-	if (pgss_enabled() && !IsParallelWorker() &&
-		queryDesc->plannedstmt->queryId != 0)
+	if (pgss_enabled() && queryDesc->plannedstmt->queryId != 0)
 		pgss_check(queryDesc->plannedstmt->queryId);
-#endif
 	if (prev_ExecutorStart)
 		prev_ExecutorStart(queryDesc, eflags);
 	else
@@ -1118,7 +1160,7 @@ pgss_ExecutorEnd(QueryDesc *queryDesc)
 		pgss_store(queryDesc->sourceText, queryId, NULL);
 	}
 #else
-	if (queryId != 0 && pgss_enabled() && !IsParallelWorker())
+	if (queryId != 0 && pgss_enabled())
 	{
 		PlannedStmt *pstmt = queryDesc->plannedstmt;
 
@@ -1161,6 +1203,9 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		!IsA(parsetree, PrepareStmt) &&
 		!IsA(parsetree, DeallocateStmt))
 	{
+		FirewallQueryId queryId = pgss_hash_string(queryString);
+
+		pgss_check(queryId);
 		nested_level++;
 		PG_TRY();
 		{
@@ -1181,7 +1226,7 @@ pgss_ProcessUtility(Node *parsetree, const char *queryString,
 		}
 		PG_END_TRY();
 
-		pgss_store(queryString, pgss_hash_string(queryString), NULL);
+		pgss_store(queryString, queryId, NULL);
 	}
 	else
 	{
@@ -1250,37 +1295,6 @@ pgss_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
 }
 
 static void
-pgss_check(FirewallQueryId queryId)
-{
-	pgssHashKey key;
-	bool		found;
-
-	if (!pgss || !pgss_hash ||
-		(pgfw_mode != PGFW_MODE_ENFORCING && pgfw_mode != PGFW_MODE_PERMISSIVE))
-		return;
-
-	key.userid = GetUserId();
-	key.queryid = queryId;
-	LWLockAcquire(pgss->lock, LW_SHARED);
-	found = hash_search(pgss_hash, &key, HASH_FIND, NULL) != NULL;
-	LWLockRelease(pgss->lock);
-
-	if (found)
-		return;
-
-	if (pgfw_mode == PGFW_MODE_ENFORCING)
-	{
-		stat_error_increment();
-		ereport(ERROR,
-				(errcode(ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED),
-				 errmsg("Prohibited SQL statement")));
-	}
-
-	stat_warning_increment();
-	ereport(WARNING, (errmsg("Prohibited SQL statement")));
-}
-
-static void
 pgss_store_statement(const char *query, int location, int len,
 					 FirewallQueryId queryId, const JumbleState *jstate)
 {
@@ -1310,6 +1324,39 @@ pgss_store_statement(const char *query, int location, int len,
 	pfree(text);
 }
 #endif
+
+static void
+pgss_check(FirewallQueryId queryId)
+{
+	pgssHashKey key;
+	bool		found;
+	bool		prohibited;
+
+	if (!pgss || !pgss_hash ||
+		(pgfw_mode != PGFW_MODE_ENFORCING && pgfw_mode != PGFW_MODE_PERMISSIVE))
+		return;
+
+	key.userid = GetUserId();
+	key.queryid = queryId;
+	LWLockAcquire(pgss->lock, LW_SHARED);
+	found = hash_search(pgss_hash, &key, HASH_FIND, NULL) != NULL;
+	LWLockRelease(pgss->lock);
+
+	prohibited = pgfw_policy == PGFW_POLICY_DENYLIST ? found : !found;
+	if (!prohibited)
+		return;
+
+	if (pgfw_mode == PGFW_MODE_ENFORCING)
+	{
+		stat_error_increment();
+		ereport(ERROR,
+				(errcode(ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED),
+				 errmsg("Prohibited SQL statement")));
+	}
+
+	stat_warning_increment();
+	ereport(WARNING, (errmsg("Prohibited SQL statement")));
+}
 
 /*
  * Calculate hash value for a key
@@ -1413,26 +1460,6 @@ pgss_store(const char *query, FirewallQueryId queryId,
 	LWLockAcquire(pgss->lock, LW_SHARED);
 
 	entry = (pgssEntry *) hash_search(pgss_hash, &key, HASH_FIND, NULL);
-
-#if PG_VERSION_NUM < 180000
-	if (!entry)
-	{
-		if (pgfw_mode == PGFW_MODE_ENFORCING)
-		{
-			LWLockRelease(pgss->lock);
-			stat_error_increment();
-			ereport(ERROR,
-				(errcode(ERRCODE_S_R_E_PROHIBITED_SQL_STATEMENT_ATTEMPTED),
-				 errmsg("Prohibited SQL statement")));
-		}
-		else if (pgfw_mode == PGFW_MODE_PERMISSIVE)
-		{
-			ereport(WARNING,(errmsg("Prohibited SQL statement")));
-			stat_warning_increment();
-			goto done;
-		}
-	}
-#endif
 
 	/* Create new entry, if not present */
 	if (!entry && pgfw_mode == PGFW_MODE_LEARNING)

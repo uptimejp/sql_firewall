@@ -5,28 +5,21 @@
 sql_firewall is a PostgreSQL extension which is intended to protect
 database from SQL injections or unexpected queries.
 
-sql_firewall module learns queries which can be executed, and
-prevents/warns on executing queries which are not found in the learned
-firewall rule.
+sql_firewall learns statement rules and can warn about or reject SQL
+according to the selected rule policy.
 
 ## How it works
 
-sql_firewall can take one of four modes specified in
-sql_firewall.firewall parameter: "learning", "enforcing",
-"permissive" and "disabled".
+Rules are keyed by `userid` and `queryid`. The default `allowlist`
+policy prohibits statements missing from the rule table for the user.
+The `denylist` policy prohibits statements present in that table.
 
-In the "learning" mode, sql_firewall collects pairs of "userid" and
-"queryid" associated with the executed queries. "queryid" is
-calculated based on a parse tree, similar to pg_stat_statements.
-
-In the "enforcing" mode, sql_firewall checks whether queries are in
-the list of collected pairs of "userid" and "queryid", the firewall
-rules. When a query not in the firewall rules comes in, sql_firewall
-produces an error with the message to prevent execution.
-
-In the "permissive" mode, sql_firewall checks queries as well, but
-allows to execute even not in the firewall rules. And produces
-warnings if the queries are not in the rules.
+| Mode | Behavior |
+| --- | --- |
+| `learning` | Collect statements as rules for the selected policy. |
+| `permissive` | Execute statements and warn when the policy prohibits them. |
+| `enforcing` | Reject statements that the policy prohibits before they execute. |
+| `disabled` | Skip policy checks and rule learning. |
 
 ## Compatibility
 
@@ -126,6 +119,15 @@ only on the installed database.
   Role defaults apply to new connections. `SET ROLE` retains the
   session's current mode. All sessions share the rule table, and the
   rules learned by a login role are saved on a clean server shutdown.
+
+- `sql_firewall.policy`
+
+  The default is `allowlist`. Set `sql_firewall.policy = 'denylist'` in
+  `postgresql.conf` and restart to use a denylist. The server loads and saves
+  each policy's rules separately. In denylist learning mode, run only the
+  statements you intend to prohibit for the corresponding login roles.
+  CSV exports contain rule rows for the active policy, so use a matching
+  policy when importing a rule file.
 
 - `sql_firewall.max`
 
