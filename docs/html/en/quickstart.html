@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- Generated from docs/md/en/quickstart.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quickstart | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../quickstart.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../quickstart.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html" aria-current="page">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="quickstart">Quickstart</h1>
+<p>Set up a temporary cluster, learn a query that looks up one order, and observe how sql_firewall handles an unregistered aggregate query. Run the steps in the same Linux or WSL shell. <a href="installation.html">Install sql_firewall</a> for the PostgreSQL version you plan to use first.</p>
+<h2 id="1-start-a-temporary-cluster">1. Start a temporary cluster</h2>
+<p>Run these commands as an unprivileged OS user. The cluster listens on a Unix socket in its own directory.</p>
+<pre class="sh"><code>PG_CONFIG=&quot;${PG_CONFIG:-pg_config}&quot;
+bindir=&quot;$(&quot;$PG_CONFIG&quot; --bindir)&quot;
+demo=&quot;$(mktemp -d /tmp/sqlfw-demo.XXXXXX)&quot;
+&quot;$bindir/initdb&quot; -D &quot;$demo/data&quot; -A trust --no-locale
+cat &gt;&gt; &quot;$demo/data/postgresql.conf&quot; &lt;&lt;EOF
+listen_addresses = &#39;&#39;
+unix_socket_directories = &#39;$demo&#39;
+port = 55432
+shared_preload_libraries = &#39;sql_firewall&#39;
+sql_firewall.firewall = &#39;disabled&#39;
+EOF
+&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -l &quot;$demo/server.log&quot; -w start
+
+admin() {
+    &quot;$bindir/psql&quot; -X -v ON_ERROR_STOP=1 -h &quot;$demo&quot; -p 55432 \
+        -U &quot;$(id -un)&quot; -d postgres &quot;$@&quot;
+}
+app() {
+    &quot;$bindir/psql&quot; -X -v ON_ERROR_STOP=1 -h &quot;$demo&quot; -p 55432 \
+        -U app_user -d postgres &quot;$@&quot;
+}</code></pre>
+<h2 id="2-set-up-the-application-role">2. Set up the application role</h2>
+<pre class="sh"><code>admin &lt;&lt;&#39;SQL&#39;
+CREATE EXTENSION sql_firewall;
+CREATE ROLE app_user LOGIN;
+CREATE TABLE demo_orders (id integer PRIMARY KEY, state text NOT NULL);
+INSERT INTO demo_orders VALUES (1, &#39;paid&#39;), (2, &#39;pending&#39;);
+GRANT SELECT ON demo_orders TO app_user;
+ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;;
+SQL</code></pre>
+<h2 id="3-learn-the-order-lookup">3. Learn the order lookup</h2>
+<pre class="sh"><code>app -Atc &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;</code></pre>
+<p>The queries return <code>paid</code> and <code>pending</code>. They differ only in the constants <code>1</code> and <code>2</code>, so they produce one rule in this example. Inspect the normalized SQL and verify that <code>calls</code> is <code>2</code>.</p>
+<pre class="sh"><code>admin -c &quot;
+SELECT query, calls
+FROM sql_firewall.sql_firewall_statements
+WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = &#39;app_user&#39;);&quot;</code></pre>
+<h2 id="4-warn-about-the-unregistered-aggregate-query">4. Warn about the unregistered aggregate query</h2>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<pre class="text"><code>WARNING:  Prohibited SQL statement
+2</code></pre>
+<h2 id="5-reject-the-unregistered-aggregate-query">5. Reject the unregistered aggregate query</h2>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;&quot;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>The lookup returns <code>pending</code>. The aggregate query fails with <code>ERROR:  Prohibited SQL statement</code> because only <code>learning</code> mode adds new rules.</p>
+<pre class="sh"><code>admin -Atc &#39;SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat&#39;</code></pre>
+<p>If you followed only these steps, the result is <code>1|1</code>.</p>
+<h2 id="6-stop-the-temporary-cluster">6. Stop the temporary cluster</h2>
+<p>Leave the cluster running if you want to try the <a href="policies.html">denylist walkthrough</a>. To finish the tutorial, run the following command.</p>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w stop</code></pre>
+<p>After shutdown, you can remove the temporary directory identified by <code>$demo</code> if you no longer need the data.</p>
+    </main>
+  </div>
+</body>
+</html>

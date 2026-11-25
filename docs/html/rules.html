@@ -1,0 +1,69 @@
+<!doctype html>
+<!-- Generated from docs/md/rules.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ルールの CSV 移行 | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="en" href="en/rules.html">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="en/rules.html" hreflang="en" lang="en">English</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html" aria-current="page">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="ルールの-csv-移行">ルールの CSV 移行</h1>
+<p>ステージングで許可リストを学習し、本番のアプリ接続を <code>enforcing</code> にしたままルールを追加する手順です。管理コマンドを実行するスーパーユーザーの接続だけを <code>disabled</code> にします。</p>
+<h2 id="1-同じルールidを使える環境を用意する">1. 同じルールIDを使える環境を用意する</h2>
+<p>移行元と移行先で PostgreSQL のメジャーバージョンと <code>sql_firewall.policy</code> をそろえます。CSV のキーは表やロールの名前ではなく、ロール OID とクエリIDです。クエリIDは参照先のオブジェクト OID の影響を受ける場合があるので、同じ名前を作り直した環境でも、ルールが一致するとは限りません。移行先の物理コピーを使って学習すると OID をそろえられます。メジャーバージョンを変更する場合は移行先のバージョンでルールを学習し直します。</p>
+<p>以下の <code>STAGING_ADMIN_DSN</code>、<code>PROD_ADMIN_DSN</code> は管理者の接続先です。<code>STAGING_APP_DSN</code>、<code>PROD_APP_DSN</code> は同じアプリ用ロールの接続先です。例では <a href="quickstart.html">クイックスタート</a>の <code>demo_orders</code> を使います。</p>
+<h2 id="2-ステージングで学習して書き出す">2. ステージングで学習して書き出す</h2>
+<pre class="sh"><code>PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$STAGING_ADMIN_DSN&quot; -X -v ON_ERROR_STOP=1 \
+    -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;&quot;
+
+psql &quot;$STAGING_APP_DSN&quot; -X -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+
+PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$STAGING_ADMIN_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &quot;SELECT sql_firewall_export_rule(&#39;/path/to/firewall.csv&#39;)&quot;</code></pre>
+<p><code>t</code> が返れば書き出し完了です。ファイルは <strong>ステージングの PostgreSQL サーバー側</strong>に作成されます。</p>
+<h2 id="3-本番で検査を続けながら取り込む">3. 本番で検査を続けながら取り込む</h2>
+<p>書き出した CSV を本番サーバーに移し、PostgreSQL のサーバープロセスが読み取れる場所に置きます。取り込み前からアプリ用ロールは <code>enforcing</code> で運用します。</p>
+<pre class="sh"><code>PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$PROD_ADMIN_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &quot;SELECT sql_firewall_import_rule(&#39;/path/to/firewall.csv&#39;)&quot;</code></pre>
+<p><code>t</code> の場合、ルールのスナップショットがディスクに書き込まれています。<code>f</code> の場合はメモリには反映されていますが、ディスクへの書き込みが失敗しています。サーバーログでファイルエラーを確認し、解消後に同じ CSV を再取り込みします。</p>
+<p>CSV の形式が不正な場合や、追加すると <code>sql_firewall.max</code> を超える場合は、反映前にエラーが出ます。既存のルールや実行回数は再取り込みで上書きされません。</p>
+<h2 id="4-アプリの接続で結果を確認する">4. アプリの接続で結果を確認する</h2>
+<pre class="sh"><code>psql &quot;$PROD_APP_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+psql &quot;$PROD_APP_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>1件検索は <code>paid</code> を返します。本番ですでに集計が許可されていない場合、集計は <code>ERROR:  Prohibited SQL statement</code> のままです。この手順の統合テストは <a href="https://github.com/soudai/sql_firewall/blob/main/tests/promote-rules.sh">tests/promote-rules.sh</a> にあります。</p>
+    </main>
+  </div>
+</body>
+</html>

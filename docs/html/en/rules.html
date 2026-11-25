@@ -1,0 +1,69 @@
+<!doctype html>
+<!-- Generated from docs/md/en/rules.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Promoting rules with CSV | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../rules.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../rules.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html" aria-current="page">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="promoting-rules-with-csv">Promoting rules with CSV</h1>
+<p>Learn allowlist rules in staging, then add them to production while application connections remain in <code>enforcing</code> mode. Use <code>disabled</code> for the superuser connection that runs the export or import.</p>
+<h2 id="1-prepare-environments-with-matching-rule-ids">1. Prepare environments with matching rule IDs</h2>
+<p>Use the same PostgreSQL major version and <code>sql_firewall.policy</code> in both environments. The CSV keys are role OIDs and query IDs. Query IDs can depend on the OIDs of referenced objects, so rebuilding a database from the same names can produce different rule IDs. Learning on a physical copy of the target cluster preserves those OIDs. Relearn rules on the target version when upgrading across PostgreSQL major versions.</p>
+<p>In this example, <code>STAGING_ADMIN_DSN</code> and <code>PROD_ADMIN_DSN</code> specify superuser connections. <code>STAGING_APP_DSN</code> and <code>PROD_APP_DSN</code> use the same application role in each environment. The example uses <code>demo_orders</code> from the <a href="quickstart.html">Quickstart</a>.</p>
+<h2 id="2-learn-and-export-in-staging">2. Learn and export in staging</h2>
+<pre class="sh"><code>PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$STAGING_ADMIN_DSN&quot; -X -v ON_ERROR_STOP=1 \
+    -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;&quot;
+
+psql &quot;$STAGING_APP_DSN&quot; -X -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+
+PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$STAGING_ADMIN_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &quot;SELECT sql_firewall_export_rule(&#39;/path/to/firewall.csv&#39;)&quot;</code></pre>
+<p>The export returns <code>t</code> and writes the file on the <strong>staging PostgreSQL server</strong>.</p>
+<h2 id="3-import-while-production-enforcement-stays-active">3. Import while production enforcement stays active</h2>
+<p>Copy the CSV to the production server and place it where the PostgreSQL server process can read it. Keep the application role in <code>enforcing</code> mode.</p>
+<pre class="sh"><code>PGOPTIONS=&#39;-c sql_firewall.firewall=disabled&#39; \
+    psql &quot;$PROD_ADMIN_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &quot;SELECT sql_firewall_import_rule(&#39;/path/to/firewall.csv&#39;)&quot;</code></pre>
+<p>A result of <code>t</code> means the new rule snapshot was written to disk. A result of <code>f</code> means the rules were added in memory and the snapshot write failed. Check the server log for the file error, fix it, and import the same CSV again.</p>
+<p>If the CSV is invalid or the import would exceed <code>sql_firewall.max</code>, the import raises an error before adding rules. Reimporting preserves existing rules and execution counters.</p>
+<h2 id="4-verify-from-the-application-connection">4. Verify from the application connection</h2>
+<pre class="sh"><code>psql &quot;$PROD_APP_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+psql &quot;$PROD_APP_DSN&quot; -X -At -v ON_ERROR_STOP=1 \
+    -c &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>The lookup returns <code>paid</code>. If the aggregate query was already absent from the production allowlist, it still fails with <code>ERROR:  Prohibited SQL statement</code>. See <a href="https://github.com/soudai/sql_firewall/blob/main/tests/promote-rules.sh">tests/promote-rules.sh</a> for the integration test.</p>
+    </main>
+  </div>
+</body>
+</html>

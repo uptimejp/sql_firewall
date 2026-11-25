@@ -1,0 +1,97 @@
+<!doctype html>
+<!-- Generated from docs/md/quickstart.md by docs/build_html.py. -->
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>クイックスタート | sql_firewall</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="alternate" hreflang="en" href="en/quickstart.html">
+</head>
+<body>
+  <a class="skip" href="#content">本文へ移動</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="en/quickstart.html" hreflang="en" lang="en">English</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="ガイド">
+      <ul>
+<li><a href="index.html">概要</a></li>
+<li><a href="installation.html">インストール</a></li>
+<li><a href="quickstart.html" aria-current="page">クイックスタート</a></li>
+<li><a href="policies.html">ポリシーと動作モード</a></li>
+<li><a href="roles.html">ログインロール別のモード</a></li>
+<li><a href="rules.html">ルールの CSV 移行</a></li>
+<li><a href="reference.html">リファレンス</a></li>
+<li><a href="packaging.html">パッケージによる導入</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="クイックスタート">クイックスタート</h1>
+<p>一時クラスタで、注文を1件ずつ読む SQL を学習し、未登録の集計 SQL に警告・拒否を出します。Linux または WSL の同じシェルで順番に実行してください。対象バージョンに sql_firewall が<a href="installation.html">インストール済み</a>であることが前提です。</p>
+<h2 id="1-一時クラスタを起動する">1. 一時クラスタを起動する</h2>
+<p>一般の OS ユーザーで実行します。接続先は専用ディレクトリの Unix ソケットです。</p>
+<pre class="sh"><code>PG_CONFIG=&quot;${PG_CONFIG:-pg_config}&quot;
+bindir=&quot;$(&quot;$PG_CONFIG&quot; --bindir)&quot;
+demo=&quot;$(mktemp -d /tmp/sqlfw-demo.XXXXXX)&quot;
+&quot;$bindir/initdb&quot; -D &quot;$demo/data&quot; -A trust --no-locale
+cat &gt;&gt; &quot;$demo/data/postgresql.conf&quot; &lt;&lt;EOF
+listen_addresses = &#39;&#39;
+unix_socket_directories = &#39;$demo&#39;
+port = 55432
+shared_preload_libraries = &#39;sql_firewall&#39;
+sql_firewall.firewall = &#39;disabled&#39;
+EOF
+&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -l &quot;$demo/server.log&quot; -w start
+
+admin() {
+    &quot;$bindir/psql&quot; -X -v ON_ERROR_STOP=1 -h &quot;$demo&quot; -p 55432 \
+        -U &quot;$(id -un)&quot; -d postgres &quot;$@&quot;
+}
+app() {
+    &quot;$bindir/psql&quot; -X -v ON_ERROR_STOP=1 -h &quot;$demo&quot; -p 55432 \
+        -U app_user -d postgres &quot;$@&quot;
+}</code></pre>
+<h2 id="2-アプリ用ロールを用意する">2. アプリ用ロールを用意する</h2>
+<pre class="sh"><code>admin &lt;&lt;&#39;SQL&#39;
+CREATE EXTENSION sql_firewall;
+CREATE ROLE app_user LOGIN;
+CREATE TABLE demo_orders (id integer PRIMARY KEY, state text NOT NULL);
+INSERT INTO demo_orders VALUES (1, &#39;paid&#39;), (2, &#39;pending&#39;);
+GRANT SELECT ON demo_orders TO app_user;
+ALTER ROLE app_user SET sql_firewall.firewall = &#39;learning&#39;;
+SQL</code></pre>
+<h2 id="3-1件検索の形を学習する">3. 1件検索の形を学習する</h2>
+<pre class="sh"><code>app -Atc &#39;SELECT state FROM demo_orders WHERE id = 1&#39;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;</code></pre>
+<p>結果は <code>paid</code>、<code>pending</code> です。この例では定数 <code>1</code> と <code>2</code> だけが異なるため、1件のルールとして学習されます。次の表示で、正規化された SQL と <code>calls = 2</code> を確認できます。</p>
+<pre class="sh"><code>admin -c &quot;
+SELECT query, calls
+FROM sql_firewall.sql_firewall_statements
+WHERE userid = (SELECT oid FROM pg_roles WHERE rolname = &#39;app_user&#39;);&quot;</code></pre>
+<h2 id="4-未登録の集計に警告を出す">4. 未登録の集計に警告を出す</h2>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;permissive&#39;&quot;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<pre class="text"><code>WARNING:  Prohibited SQL statement
+2</code></pre>
+<h2 id="5-未登録の集計を拒否する">5. 未登録の集計を拒否する</h2>
+<pre class="sh"><code>admin -c &quot;ALTER ROLE app_user SET sql_firewall.firewall = &#39;enforcing&#39;&quot;
+app -Atc &#39;SELECT state FROM demo_orders WHERE id = 2&#39;
+app -Atc &#39;SELECT count(*) FROM demo_orders&#39;</code></pre>
+<p>1件検索は <code>pending</code> を返します。集計は <code>ERROR:  Prohibited SQL statement</code> で終了します。<code>permissive</code> で実行した文は新しいルールに追加されないためです。</p>
+<pre class="sh"><code>admin -Atc &#39;SELECT sql_warning, sql_error FROM sql_firewall.sql_firewall_stat&#39;</code></pre>
+<p>この手順だけを実行した場合、結果は <code>1|1</code> です。</p>
+<h2 id="6-一時クラスタを停止する">6. 一時クラスタを停止する</h2>
+<p>同じクラスタで<a href="policies.html">拒否リスト</a>を試す場合は、起動したまま次のガイドに進みます。終了するときは次を実行します。</p>
+<pre class="sh"><code>&quot;$bindir/pg_ctl&quot; -D &quot;$demo/data&quot; -m fast -w stop</code></pre>
+<p>停止後、データが不要になったら、<code>$demo</code> が指す一時ディレクトリを削除できます。</p>
+    </main>
+  </div>
+</body>
+</html>
