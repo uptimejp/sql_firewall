@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- Generated from docs/md/en/packaging.md by docs/build_html.py. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Package installation | sql_firewall</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="alternate" hreflang="ja" href="../packaging.html">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="masthead">
+    <div class="header-inner">
+      <a class="brand" href="index.html">sql_firewall</a>
+      <div class="header-links">
+        <a href="../packaging.html" hreflang="ja" lang="ja">日本語</a>
+        <a href="https://github.com/soudai/sql_firewall/tree/main">GitHub</a>
+      </div>
+    </div>
+  </header>
+  <div class="layout">
+    <nav aria-label="Guides">
+      <ul>
+<li><a href="index.html">Overview</a></li>
+<li><a href="installation.html">Installation</a></li>
+<li><a href="quickstart.html">Quickstart</a></li>
+<li><a href="policies.html">Policies and modes</a></li>
+<li><a href="roles.html">Login role modes</a></li>
+<li><a href="rules.html">Promoting rules with CSV</a></li>
+<li><a href="reference.html">Reference</a></li>
+<li><a href="packaging.html" aria-current="page">Package installation</a></li>
+      </ul>
+    </nav>
+    <main id="content">
+<h1 id="package-installation">Package installation</h1>
+<p>The fork includes an RPM spec for PGDG installations and an ebuild for a Gentoo overlay.</p>
+<h2 id="rpm">RPM</h2>
+<p>Install the matching PGDG PostgreSQL development package, a C compiler, GNU Make, and <code>rpmbuild</code>. For PostgreSQL 19, use <code>postgresql19-devel</code>. The spec accepts <code>9.4</code>, <code>18</code>, and <code>19</code> as <code>pgmajor</code>. The 9.4 build requires the archived development package.</p>
+<pre class="sh"><code>topdir=&quot;$(rpm --eval &#39;%{_topdir}&#39;)&quot;
+mkdir -p &quot;$topdir/SOURCES&quot;
+git archive --format=tar.gz --prefix=sql_firewall-0.8.1/ \
+    -o &quot;$topdir/SOURCES/sql_firewall-0.8.1.tar.gz&quot; HEAD
+rpmbuild -ba --define &#39;pgmajor 19&#39; packaging/rpm/sql_firewall.spec</code></pre>
+<p>Find the binary packages in <code>$topdir/RPMS</code>. Use <code>rpm -qpl</code> to confirm that the package contains the module, SQL script, and control file, then install the desired RPM.</p>
+<pre class="sh"><code>sudo dnf install /path/to/generated-postgresql19-sqlfirewall.rpm</code></pre>
+<p>For a custom PostgreSQL installation, pass <code>--define 'pg_config /path/to/bin/pg_config'</code>. The build verifies that <code>pg_config</code> matches <code>pgmajor</code>. <a href="https://github.com/soudai/sql_firewall/tree/main/packaging/rpm">RPM spec and build instructions</a></p>
+<h2 id="gentoo">Gentoo</h2>
+<p>Copy the <a href="https://github.com/soudai/sql_firewall/tree/main/packaging/gentoo/dev-db/sql-firewall">ebuild directory</a> to <code>dev-db/sql-firewall</code> in a local overlay. The ebuild builds the fork's <code>main</code> branch.</p>
+<p>To target PostgreSQL 18, for example, add this entry to Portage's <code>package.use</code>.</p>
+<pre class="text"><code>dev-db/sql-firewall postgres_targets_postgres18</code></pre>
+<pre class="sh"><code>ebuild /path/to/overlay/dev-db/sql-firewall/sql-firewall-9999.ebuild manifest
+emerge --ask dev-db/sql-firewall</code></pre>
+<p>Available PostgreSQL slots depend on the Gentoo repositories and <code>postgres-multi</code> eclass in use. <a href="https://github.com/soudai/sql_firewall/tree/main/packaging/gentoo">Gentoo overlay instructions</a></p>
+<p>After installing a package, <a href="installation.html">preload the module and create the extension</a>.</p>
+    </main>
+  </div>
+</body>
+</html>
